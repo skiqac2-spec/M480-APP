@@ -23,6 +23,17 @@ static CRITICAL_SECTION g_cs;
 static volatile long g_time_ofs;
 static volatile int g_time_synced;
 static DWORD parse_http_date(const char *s);
+#ifndef BUILD_UNIX
+#define BUILD_UNIX 1763424000UL /* 2025-11-18 */
+#endif
+/* time used for certificate checks: device clock + learned correction, but never
+   earlier than the build date (a phone with a flat clock battery says 2008/2009) */
+static DWORD net_now(void)
+{
+	DWORD t = now_unix() + g_time_ofs;
+	if (!g_time_ofs && t < (DWORD)BUILD_UNIX) t = (DWORD)BUILD_UNIX;
+	return t;
+}
 static int g_inited;
 
 /* ------------------------------------------------------------------ */
@@ -373,7 +384,7 @@ static int conn_open(Conn *c, const Url *u, NetCtl *ctl, HttpResp *resp)
 	if (strcmp(u->scheme, "https") == 0) {
 		unsigned char seed[32];
 		br_ssl_session_parameters sp;
-		DWORD t = now_unix() + g_time_ofs;
+		DWORD t = net_now();
 		int resume;
 		c->tls = 1;
 		br_ssl_client_init_full(&c->sc, &c->xc, TAs, TAs_NUM);
@@ -409,6 +420,14 @@ static void tls_fail(Conn *c, HttpResp *resp, const Url *u)
 	if (resp->err[0]) return;
 	if (c->ctl && c->ctl->abort) { strcpy(resp->err, "취소됨"); return; }
 	t = tls_err_text(resp->certerr ? resp->certerr : e);
+	if (resp->certerr == BR_ERR_X509_EXPIRED || resp->certerr == BR_ERR_X509_TIME_UNKNOWN) {
+		SYSTEMTIME st;
+		GetLocalTime(&st);
+		_snprintf(resp->err, sizeof resp->err, "보안 연결 실패: 인증서 날짜 오류 (폰 날짜 %04d-%02d-%02d, 보정 %ld초) [%d]",
+		          st.wYear, st.wMonth, st.wDay, (long)g_time_ofs, resp->certerr);
+		tube_log("%s host=%s", resp->err, u->host);
+		return;
+	}
 	if (t) _snprintf(resp->err, sizeof resp->err, "보안 연결 실패: %s [%d]", t, resp->certerr ? resp->certerr : e);
 	else _snprintf(resp->err, sizeof resp->err, "보안 연결 실패 (오류 %d)", e);
 }
@@ -902,11 +921,11 @@ static int is_time_err(int e) { return e == BR_ERR_X509_EXPIRED || e == BR_ERR_X
 
 /* The phone's clock may be wrong (old battery etc.), which makes every certificate
    look expired. Learn the real time from a plain-HTTP Date header and retry. */
-static int time_sync(NetCtl *ctl)
+static int time_sync_impl(NetCtl *ctl, int force)
 {
 	static const char *urls[] = { "http://www.google.com/generate_204", "http://clients3.google.com/generate_204", "http://www.msftconnecttest.com/connecttest.txt" };
 	int i;
-	if (g_time_synced) return 0;
+	if (g_time_synced && !force) return 0;
 	g_time_synced = 1;
 	for (i = 0; i < 3; i++) {
 		HttpResp r;
@@ -914,7 +933,8 @@ static int time_sync(NetCtl *ctl)
 		memset(&r, 0, sizeof r);
 		if (do_one(urls[i], "GET", NULL, 0, NULL, NULL, &r, ctl, 65536, &loc) && r.date > 1600000000UL) {
 			long ofs = (long)(r.date - now_unix());
-			g_time_ofs = ofs;
+			/* ignore small differences (keeps the device clock when it is fine) */
+			g_time_ofs = (ofs > 600 || ofs < -600) ? ofs : 0;
 			tube_log("clock: device %lu, server %lu, offset %ld s", (unsigned long)now_unix(), (unsigned long)r.date, ofs);
 			free(loc);
 			http_resp_free(&r);
@@ -927,6 +947,8 @@ static int time_sync(NetCtl *ctl)
 	g_time_synced = 0;
 	return 0;
 }
+static int time_sync(NetCtl *ctl) { return time_sync_impl(ctl, 0); }
+int net_time_sync(NetCtl *ctl) { return time_sync_impl(ctl, 1); }
 
 int http_request(const char *url, const char *method, const char *body, int bodylen,
                  const char *ctype, const char *referer, HttpResp *r, NetCtl *ctl, int maxbytes)

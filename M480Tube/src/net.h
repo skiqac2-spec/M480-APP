@@ -49,6 +49,9 @@ void cookies_load(void);
 void cookies_save(void);
 void cookies_clear(void);
 
+/* learn the real time from a plain-HTTP Date header (call once at start-up) */
+int net_time_sync(NetCtl *ctl);
+
 /* streaming range reader with keep-alive (for media) */
 typedef struct HStream HStream;
 HStream *hs_new(NetCtl *ctl);

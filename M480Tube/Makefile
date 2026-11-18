@@ -12,7 +12,7 @@ BRDEFS := -DBR_USE_UNIX_TIME=0 -DBR_USE_WIN32_TIME=0 -DBR_USE_URANDOM=0 -DBR_USE
 CE_CC := /opt/cegcc/bin/arm-mingw32ce-gcc
 CE_WINDRES := /opt/cegcc/bin/arm-mingw32ce-windres
 CE_FF := ffmpeg-ce
-CE_CFLAGS := -O2 -march=armv5te -mtune=xscale -D_WIN32_WCE=0x0502 -Icompat -DUNICODE -D_UNICODE $(INC) -I$(CE_FF)/include $(BRDEFS) -Wall -Wno-unused-function -Wno-pointer-sign -Wno-deprecated-declarations
+CE_CFLAGS := -O2 -DBUILD_UNIX=$(shell date +%s)UL -march=armv5te -mtune=xscale -D_WIN32_WCE=0x0502 -Icompat -DUNICODE -D_UNICODE $(INC) -I$(CE_FF)/include $(BRDEFS) -Wall -Wno-unused-function -Wno-pointer-sign -Wno-deprecated-declarations
 CE_LDFLAGS := -static -Wl,--stack=0x40000 -Wl,--major-subsystem-version=5,--minor-subsystem-version=2 \
 	-L$(CE_FF)/lib -lavformat -lavcodec -lavutil -lws2 -laygshell
 
