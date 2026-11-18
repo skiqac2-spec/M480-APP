@@ -1,0 +1,48 @@
+# M480Tube 연결 설정 (앱이 시작할 때 이 파일을 받아 적용함)
+# 유튜브가 바뀌어 재생이 안 될 때 이 파일만 고치면 앱을 다시 설치하지 않아도 됨
+version=2
+hl=ko
+gl=KR
+[search]
+name=WEB
+version=2.20261019.01.00
+id=1
+ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36
+url=https://www.youtube.com/youtubei/v1/search?prettyPrint=false
+client_extra="originalUrl":"https://www.youtube.com","platform":"DESKTOP","utcOffsetMinutes":540
+body_extra="request":{"internalExperimentFlags":[],"useSsl":true},"user":{"lockedSafetyMode":false}
+headers=Origin: https://www.youtube.com|Referer: https://www.youtube.com|Cookie: SOCS=CAE=|X-YouTube-Client-Name: 1|X-YouTube-Client-Version: 2.20261019.01.00
+params=EgIQAQ%3D%3D
+[player]
+name=VISIONOS
+version=1.04
+id=101
+ua=com.google.visionos.youtube/1.04(RealityDevice17,1; U; CPU visionOS 26_6_0 like Mac OS X; KR)
+url=https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&t={T}&id={ID}
+visitor_url=https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false
+client_extra="clientScreen":"WATCH","platform":"MOBILE","deviceMake":"Apple","deviceModel":"RealityDevice17,1","osName":"visionOS","osVersion":"26.6.0.23O770","utcOffsetMinutes":0
+body_extra="request":{"internalExperimentFlags":[],"useSsl":true},"user":{"lockedSafetyMode":false}
+headers=X-Goog-Api-Format-Version: 2
+media_post=1
+media_cpn=1
+media_rn=0
+[player]
+name=ANDROID_VR
+version=1.65.10
+id=28
+ua=com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip
+url=https://www.youtube.com/youtubei/v1/player?prettyPrint=false
+client_extra="deviceMake":"Oculus","deviceModel":"Quest 3","androidSdkVersion":32,"osName":"Android","osVersion":"12L"
+headers=X-YouTube-Client-Name: 28|X-YouTube-Client-Version: 1.65.10
+media_post=0
+media_cpn=0
+[formats]
+video240=133,160,134
+video144=160,133
+video360=134,133,160
+audio=140,139
+[tuning]
+chunk_kb=1024
+asm=1
+loopfilter=0
+notice=

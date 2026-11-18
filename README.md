@@ -10,6 +10,7 @@ M480Web 브라우저의 **내 파일함**(홈 화면 또는 메뉴 ≡)에서 �
 |---|---|
 | `M480Web/` | TLS 1.2 웹 브라우저 소스 (BearSSL 내장) |
 | `AbyssLabyrinth/` | 심연의 미궁 (1인칭 던전 RPG) 소스·데이터 |
+| `M480Tube/` | 유튜브 뷰어 (240p, FFmpeg h264/aac 디코딩) 소스 + 원격 연결 설정 `m480tube_config.txt` |
 | `M480Music/` | 안 깨지는 뮤직 플레이어 소스 (MP3/WAV, 22kHz 출력·리미터·자동 음질 하향) |
 | `downloads/` | 휴대폰용 완성 파일 + 파일 목록(files.txt) |
 | `tools/update_manifest.py` | `downloads/files.in` → `files.txt` (크기 자동 기입) |
@@ -20,4 +21,5 @@ M480Web 브라우저의 **내 파일함**(홈 화면 또는 메뉴 ≡)에서 �
 ## 빌드
 - M480Web: `cd M480Web && make ce` (cegcc `/opt/cegcc` 필요), PC 테스트판 `make win`
 - AbyssLabyrinth: Actions 탭의 빌드 결과 또는 `make wm`
+- M480Tube: Actions 탭의 빌드 결과, 또는 `./build_ffmpeg.sh ce && make ce` (PC 테스트판 `./build_ffmpeg.sh win && make win`)
 - M480Music: `cd M480Music && make` (cegcc 필요) — Actions 탭에서 exe·cab 자동 빌드
