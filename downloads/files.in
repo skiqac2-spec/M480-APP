@@ -9,3 +9,7 @@ M480Web/README.txt	-	사용 설명서
 AbyssLabyrinth/Abyss_WM61.exe	-	게임 실행 파일
 ../AbyssLabyrinth/data/abyss_mon.dat	-	몬스터 그래픽 12MB (exe와 같은 폴더에 있어야 함)	AbyssLabyrinth/abyss_mon.dat
 ../AbyssLabyrinth/README.txt	-	게임 설명서	AbyssLabyrinth/README.txt
+@M480Music	M480 뮤직 (안 깨지는 음악 플레이어)	2026-11-18
+M480Music/M480Music.cab	-	설치 파일 - 누르면 설치
+M480Music/M480Music.exe	-	설치 없이 쓰는 실행 파일
+M480Music/README.txt	-	사용 설명서
