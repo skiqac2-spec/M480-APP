@@ -10,6 +10,7 @@
 #include <stdarg.h>
 
 int GH;
+int GW = 240;
 u16 *FB;
 
 #ifdef _WIN32
@@ -56,6 +57,7 @@ static unsigned hsh(int x, int y)
     return h ^ (h >> 16);
 }
 
+#define XO ((GW - 240) / 2)      /* centring offset for layouts designed at 240 wide */
 static int clipY0 = 0, clipY1 = 9999;
 static void pset(int x, int y, u16 c)
 {
@@ -461,7 +463,7 @@ static void addlog(u16 c, const wchar_t *f, ...)
 static int VY, VH, VCX, VCY, MY, PY;
 static void layout(void)
 {
-    VY = 16; PY = GH - 120; MY = PY - 30; VH = MY - VY; VCX = 120; VCY = VY + VH / 2;
+    VY = 16; PY = GH - 120; MY = PY - 30; VH = MY - VY; VCX = GW / 2; VCY = VY + VH / 2;
 }
 
 /* buttons */
@@ -1141,7 +1143,7 @@ static void vignette(void)
         int dy = (y - VCY) * 256 / hv, dy2 = dy * dy;
         u16 *row = FB + y * GW;
         for (x = 0; x < GW; x++) {
-            int dx = (x - VCX) * 256 / 120, d2 = (dx * dx + dy2) >> 8, f;
+            int dx = (x - VCX) * 256 / VCX, d2 = (dx * dx + dy2) >> 8, f;
             if (d2 <= 120) continue;
             f = 256 - (d2 - 120) * 200 / 392;
             if (f < 40) f = 40;
@@ -1543,7 +1545,7 @@ static struct {
     struct { short x, y, vx, vy, t; } bl[32];
     int bgok;
 } B;
-static u16 bgbuf[GW * 480];
+static u16 bgbuf[GW_MAX * 480];
 
 static void sprite_size(int spr, int *w, int *h)
 {
@@ -2671,11 +2673,11 @@ static void render_cmdbar(void)
     belt_slots(B.phase == BP_CMD || B.phase == BP_POTION);
     for (i = 0; i < 5; i++) {
         static const wchar_t *LB[5] = { L"공격", L"마법", L"도구", L"방어", L"도망" };
-        sbutton(CMDX[i], PY + CMDY[i], CMDW[i], 28, LB[i], B_CMD + i, choosing, choosing && i == B.cmd);
+        sbutton(XO + CMDX[i], PY + CMDY[i], CMDW[i], 28, LB[i], B_CMD + i, choosing, choosing && i == B.cmd);
     }
     sbutton(4, PY + 96, 64, 20, L"취소", B_CANCEL, B.phase == BP_MAGIC || B.phase == BP_TARGET || B.phase == BP_POTION, 0);
-    sbutton(172, PY + 96, 64, 20, choosing ? L"결정" : L"계속", B_OKB, 1, 0);
-    txtf(120, PY + 99, C_GOLD, T_CENTER | T_SHADOW, L"레벨 %d", S.lvl);
+    sbutton(GW - 68, PY + 96, 64, 20, choosing ? L"결정" : L"계속", B_OKB, 1, 0);
+    txtf(GW / 2, PY + 99, C_GOLD, T_CENTER | T_SHADOW, L"레벨 %d", S.lvl);
     if (!choosing) addbtn(0, PY - 42, GW, 42, B_OKB);
 }
 static void render_battle(void)
@@ -3635,8 +3637,8 @@ static void panel_trade(void)
 {
     Item *it = trade_item(tsel);
     belt_slots(0);
-    sbutton(73, PY + 36, 94, 28, ttab == 0 ? L"구매" : L"판매", B_USE, it && it->kind, 0);
-    sbutton(73, PY + 66, 94, 28, L"닫기", B_CLOSE, 1, 0);
+    sbutton(XO + 73, PY + 36, 94, 28, ttab == 0 ? L"구매" : L"판매", B_USE, it && it->kind, 0);
+    sbutton(XO + 73, PY + 66, 94, 28, L"닫기", B_CLOSE, 1, 0);
 }
 
 /* ---- inn / storyteller conversation ---- */
@@ -3691,7 +3693,7 @@ static void render_talk(void)
     txt(16, y0 + 5, NPCN[CA->act][talk_who], C_GOLD, T_SHADOW);
     if (talkmsg[0][0]) txt(16, y0 + 21, talkmsg[0], C_WHITE, T_SHADOW);
     if (talkmsg[1][0]) txt(16, y0 + 35, talkmsg[1], C_WHITE, T_SHADOW);
-    list_window(30, y0 + 60, 180, talk_who == 3 ? IN : EL, 0, talk_len(), sel, B_LIST, 20);
+    list_window(GW / 2 - 90, y0 + 60, 180, talk_who == 3 ? IN : EL, 0, talk_len(), sel, B_LIST, 20);
 }
 
 /* ---- NPC interaction (bumping into them) ---- */
@@ -3857,7 +3859,7 @@ static void belt_slots(int active)
 {
     int i;
     for (i = 0; i < 4; i++) {
-        int x = 74 + i * 23, y = PY + 9;
+        int x = XO + 74 + i * 23, y = PY + 9;
         fill(x, y, 22, 22, rgb(14, 10, 8));
         rectl(x, y, 22, 22, rgb(110, 86, 44));
         if (S.belt[i].kind) potion_icon(x + 2, y + 1, 19, S.belt[i].kind);
@@ -3894,32 +3896,35 @@ static void render_panel(void)
     hline(0, GW - 1, PY, rgb(10, 8, 6));
     hline(0, GW - 1, PY + 1, rgb(120, 104, 80));
     hline(0, GW - 1, PY + 2, rgb(40, 34, 28));
-    orb_cradle(36, PY + 48, 0);
-    orb_cradle(204, PY + 48, 1);
-    orb(36, PY + 48, 28, S.hp, mh, 1);
-    orb(204, PY + 48, 28, S.mp, mm, 0);
-    txtf(36, PY + 80, rgb(255, 160, 150), T_CENTER | T_SHADOW, L"%d/%d", S.hp, mh);
-    txtf(204, PY + 80, rgb(170, 180, 255), T_CENTER | T_SHADOW, L"%d/%d", S.mp, mm);
+    {
+        int ol = 36 + XO / 2, orr = GW - 36 - XO / 2;     /* orbs sit between the centre block and the edges */
+        orb_cradle(ol, PY + 48, 0);
+        orb_cradle(orr, PY + 48, 1);
+        orb(ol, PY + 48, 28, S.hp, mh, 1);
+        orb(orr, PY + 48, 28, S.mp, mm, 0);
+        txtf(ol, PY + 80, rgb(255, 160, 150), T_CENTER | T_SHADOW, L"%d/%d", S.hp, mh);
+        txtf(orr, PY + 80, rgb(170, 180, 255), T_CENTER | T_SHADOW, L"%d/%d", S.mp, mm);
+    }
     /* exp bar */
     {
         int w = 94 * S.exp / exp_next(S.lvl);
-        fill(73, PY + 3, 94, 4, rgb(16, 12, 8));
-        fill(73, PY + 3, w, 4, rgb(200, 170, 70));
+        fill(XO + 73, PY + 3, 94, 4, rgb(16, 12, 8));
+        fill(XO + 73, PY + 3, w, 4, rgb(200, 170, 70));
     }
 }
 
 static void panel_explore(void)
 {
     belt_slots(1);
-    sbutton(73, PY + 36, 30, 28, L"◀", B_TL, 1, 0);
-    sbutton(105, PY + 36, 30, 28, L"▲", B_FWD, 1, 0);
-    sbutton(137, PY + 36, 30, 28, L"▶", B_TR, 1, 0);
-    sbutton(73, PY + 66, 30, 28, L"가방", B_INV, 1, 0);
-    sbutton(105, PY + 66, 30, 28, L"▼", B_BACK, 1, 0);
-    sbutton(137, PY + 66, 30, 28, L"지도", B_MAP, 1, showmap);
+    sbutton(XO + 73, PY + 36, 30, 28, L"◀", B_TL, 1, 0);
+    sbutton(XO + 105, PY + 36, 30, 28, L"▲", B_FWD, 1, 0);
+    sbutton(XO + 137, PY + 36, 30, 28, L"▶", B_TR, 1, 0);
+    sbutton(XO + 73, PY + 66, 30, 28, L"가방", B_INV, 1, 0);
+    sbutton(XO + 105, PY + 66, 30, 28, L"▼", B_BACK, 1, 0);
+    sbutton(XO + 137, PY + 66, 30, 28, L"지도", B_MAP, 1, showmap);
     sbutton(4, PY + 96, 64, 20, S.pts ? L"캐릭터 +" : L"캐릭터", B_CHAR, 1, S.pts > 0 && (tickc & 8));
-    sbutton(172, PY + 96, 64, 20, L"메뉴", B_MENU, 1, 0);
-    txtf(120, PY + 99, C_GOLD, T_CENTER | T_SHADOW, L"레벨 %d", S.lvl);
+    sbutton(GW - 68, PY + 96, 64, 20, L"메뉴", B_MENU, 1, 0);
+    txtf(GW / 2, PY + 99, C_GOLD, T_CENTER | T_SHADOW, L"레벨 %d", S.lvl);
 }
 
 static void list_window(int x, int y, int w, const wchar_t **items, const int *en, int n, int cur, int idbase, int lh)
@@ -3982,7 +3987,7 @@ static void render_inv(void)
     stone(0, y0, GW, h, 34);
     goldframe(0, y0, GW, h);
     for (i = 0; i < 4; i++) {
-        int x = 16 + i * 56, y = y0 + 16;
+        int x = XO + 16 + i * 56, y = y0 + 16;
         txt(x + 18, y0 + 3, EQN[i], C_GOLD, T_CENTER | T_SHADOW);
         fill(x, y, 36, 36, rgb(14, 10, 8));
         rectl(x, y, 36, 36, isel == i ? rgb(255, 230, 120) : rgb(90, 84, 72));
@@ -3990,7 +3995,7 @@ static void render_inv(void)
         addbtn(x, y, 36, 36, B_SLOT + i);
     }
     for (i = 0; i < INV_N; i++) {
-        int x = 12 + (i % 6) * 36, y = y0 + 58 + (i / 6) * 36;
+        int x = XO + 12 + (i % 6) * 36, y = y0 + 58 + (i / 6) * 36;
         fill(x, y, 34, 34, rgb(14, 10, 8));
         fill(x, y, 34, 34, rgb(10, 10, 14));
         rectl(x, y, 34, 34, isel == i + 4 ? rgb(255, 230, 120) : rgb(62, 62, 72));
@@ -4010,9 +4015,9 @@ static void panel_inv(void)
     belt_slots(0);
     if (isel < 4) lab = L"해제";
     else if (it->kind >= IK_W && it->kind <= IK_R) lab = L"장착";
-    sbutton(73, PY + 36, 46, 28, lab, B_USE, it->kind != 0, 0);
-    sbutton(121, PY + 36, 46, 28, L"버리기", B_DROP, it->kind != 0 && isel >= 4, 0);
-    sbutton(73, PY + 66, 94, 28, L"닫기", B_CLOSE, 1, 0);
+    sbutton(XO + 73, PY + 36, 46, 28, lab, B_USE, it->kind != 0, 0);
+    sbutton(XO + 121, PY + 36, 46, 28, L"버리기", B_DROP, it->kind != 0 && isel >= 4, 0);
+    sbutton(XO + 73, PY + 66, 94, 28, L"닫기", B_CLOSE, 1, 0);
 }
 
 static int use_portal_scroll(void);
@@ -4071,7 +4076,7 @@ static void render_char(void)
     {   /* the wanderer as currently equipped */
         int pw, ph, pax, pay, pnf;
         if (hero_build(7, 150, &pw, &ph, &pax, &pay, &pnf)) {
-            int gx = 208, gy = y0 + 128;
+            int gx = GW - 32 - XO / 2, gy = y0 + 128;
             for (y = -2; y <= 2; y++) for (i = -16; i <= 16; i++)
                 if (i * i * 4 / 256 + y * y < 4) FB[(gy + y) * GW + gx + i] = shade(FB[(gy + y) * GW + gx + i], 120);
             blit_frame(7, (tickc >> 1) & 7, pw, ph, pax, pay, gx, gy, 256, 256, 0, 0, 0);
@@ -4111,7 +4116,7 @@ static void render_char(void)
 static void panel_closeonly(void)
 {
     belt_slots(0);
-    sbutton(73, PY + 66, 94, 28, L"닫기", B_CLOSE, 1, 0);
+    sbutton(XO + 73, PY + 66, 94, 28, L"닫기", B_CLOSE, 1, 0);
 }
 
 /* ---- title / dead / menus ---- */
@@ -4138,7 +4143,7 @@ static u16 fire_col(int v)
     return rgb(255, 120 + (v - 24) * 10, (v - 24) * 12);
 }
 
-static u16 tbuf[GW * 480];
+static u16 tbuf[GW_MAX * 480];
 static void render_title(void)
 {
     int y, x, ty = GH / 5;
@@ -4157,7 +4162,7 @@ static void render_title(void)
             u16 c = fire_col(v);
             int a, b;
             for (b = 0; b < 2; b++) for (a = 0; a < 3; a++) {
-                int px = x * 3 + a, py = ty - 46 + y * 2 + b;
+                int px = XO + x * 3 + a, py = ty - 46 + y * 2 + b;
                 if (py >= 0 && py < GH) FB[py * GW + px] = mix(FB[py * GW + px], c, clampi(v * 9, 0, 255));
             }
         }
@@ -4188,7 +4193,7 @@ static void render_menu(void)
 {
     const wchar_t *it[5] = { L"모험 계속", snd_music_on ? L"음악: 켜짐" : L"음악: 꺼짐", snd_sfx_on ? L"효과음: 켜짐" : L"효과음: 꺼짐",
                              L"저장하고 종료", confirm ? L"정말 포기? (한번 더)" : L"포기하고 처음으로" };
-    list_window(30, VY + 20, 180, it, 0, 5, sel, B_LIST, 22);
+    list_window(GW / 2 - 90, VY + 20, 180, it, 0, 5, sel, B_LIST, 22);
 }
 
 static int price(int k) { return k == IK_HP ? 25 + S.floor * 3 : k == IK_MP ? 25 + S.floor * 3 : 90 + S.floor * 6; }
@@ -4203,7 +4208,7 @@ static void render_shop(void)
     dqwin(10, VY + 6, GW - 20, 40);
     txt(20, VY + 12, L"떠돌이 상인:", C_GOLD, 0);
     txt(20, VY + 26, L"\"살아남고 싶다면 사 가게나.\"", rgb(255, 255, 255), 0);
-    list_window(30, VY + 52, 180, it, 0, 4, sel, B_LIST, 20);
+    list_window(GW / 2 - 90, VY + 52, 180, it, 0, 4, sel, B_LIST, 20);
 }
 
 static void render_prompt(void)
@@ -4215,7 +4220,7 @@ static void render_prompt(void)
     else txtf(GW / 2, VY + 21, C_GOLD, T_CENTER, L"%ls 깊은 곳", AREAS[na].n);
     if (AREAS[na].camp && na != area_of(S.floor)) txtf(GW / 2, VY + 21, C_GOLD, T_CENTER, L"%ls: %ls", ACTN[AREAS[na].act], AREAS[na].n);
     txt(GW / 2, VY + 35, L"이동하시겠습니까?", rgb(255, 255, 255), T_CENTER);
-    list_window(80, VY + 56, 80, it, 0, 2, sel, B_LIST, 20);
+    list_window(GW / 2 - 40, VY + 56, 80, it, 0, 2, sel, B_LIST, 20);
 }
 
 void game_render(void)
@@ -4247,8 +4252,8 @@ void game_render(void)
         else if (mode == M_SHOP) { render_shop(); belt_slots(0); }
         else if (mode == M_PROMPT) { render_prompt(); belt_slots(0); }
         else if (mode == M_STORY) { render_story(); belt_slots(0); }
-        else if (mode == M_TALK) { render_talk(); belt_slots(0); sbutton(73, PY + 66, 94, 28, L"떠나기", B_CLOSE, 1, 0); }
-        else if (mode == M_WARP) { render_warp(); belt_slots(0); sbutton(73, PY + 66, 94, 28, L"닫기", B_CLOSE, 1, 0); }
+        else if (mode == M_TALK) { render_talk(); belt_slots(0); sbutton(XO + 73, PY + 66, 94, 28, L"떠나기", B_CLOSE, 1, 0); }
+        else if (mode == M_WARP) { render_warp(); belt_slots(0); sbutton(XO + 73, PY + 66, 94, 28, L"닫기", B_CLOSE, 1, 0); }
         else panel_explore();
         break;
     }

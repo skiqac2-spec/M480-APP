@@ -5,7 +5,8 @@
 
 typedef unsigned short u16;
 
-#define GW 240            /* logical width (pixels) */
+#define GW_MAX 320
+extern int GW;            /* logical width: 240 (portrait screens) .. 320 (square screens) */
 extern int GH;            /* logical height (320..427) */
 extern u16 *FB;           /* RGB565 framebuffer GW*GH, top-down */
 

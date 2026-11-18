@@ -356,13 +356,16 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     sw = GetSystemMetrics(SM_CXSCREEN);
     sh = GetSystemMetrics(SM_CYSCREEN);
 #ifdef _WIN32_WCE
-    if (sw <= sh) { logH = sh * GW / sw; if (logH < 320) logH = 320; if (logH > 427) logH = 427; }
-    else logH = 320;
+    /* portrait (240x320, 480x640...): 240 wide; square (320x320 SCH-M480) or landscape: up to 320 wide */
+    if (sw * 4 <= sh * 3) { GW = 240; logH = sh * GW / sw; if (logH < 320) logH = 320; if (logH > 427) logH = 427; }
+    else { logH = 320; GW = sw * 320 / sh; if (GW < 240) GW = 240; if (GW > GW_MAX) GW = GW_MAX; GW &= ~1; }
     hwnd = CreateWindowW(CLS, L"심연의 미궁", WS_VISIBLE, 0, 0, sw, sh, NULL, NULL, hi, NULL);
 #else
     {
-        RECT r = { 0, 0, GW * 2, 320 * 2 };
+        RECT r;
+        if (strstr(GetCommandLineA(), "-sq")) GW = 320;    /* test the square-screen layout */
         logH = 320;
+        r.left = 0; r.top = 0; r.right = GW * 2; r.bottom = 320 * 2;
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
         hwnd = CreateWindowW(CLS, L"심연의 미궁 (PC 테스트판)", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                              CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, NULL, NULL, hi, NULL);

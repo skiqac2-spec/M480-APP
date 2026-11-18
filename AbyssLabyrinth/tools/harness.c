@@ -6,7 +6,7 @@
 #include <locale.h>
 int harness_mode(void); int harness_bphase(void); void harness_cheat(void); void harness_boss(void); void harness_magic(void); void harness_area(int); void harness_unique(void); void harness_gallery(int,int,int); void harness_bossk(int); void harness_anim(int,int); void harness_town(void (*)(const char *)); void harness_act(int,int); void harness_lvl(int);
 
-static u16 fb[GW * 480];
+static u16 fb[GW_MAX * 480];
 static FILE *tlog;
 
 int plat_text_w(const wchar_t *s, int fl)
@@ -69,6 +69,7 @@ int main(int argc, char **argv)
     int i;
     setlocale(LC_ALL, "C.UTF-8");
     if (argc > 1) H = atoi(argv[1]);
+    if (getenv("GWIDTH")) GW = atoi(getenv("GWIDTH"));
     remove(savepath);
     game_init(H, fb, 777);
     audio_init();
