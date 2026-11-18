@@ -29,6 +29,12 @@ typedef struct {
 	char client[40];
 	int media_post;     /* fetch media with POST "x\0" */
 	int media_rn;       /* append &rn=<request number> */
+	/* alternative video formats (vurl is alt[0]); tried in order if the server refuses one */
+	int nalt;
+	struct { char *url; long size; int itag, w, h; } alt[8];
+	int client_idx;     /* which configured client produced these URLs */
+	char id[16];
+	int quality;
 	char err[400];
 } YtStreams;
 
@@ -49,6 +55,8 @@ void yt_list_free(YtList *l);
 
 /* quality: 0 = 240p, 1 = 144p, 2 = 360p */
 int  yt_streams(const char *id, int quality, YtStreams *out, NetCtl *ctl);
+/* same, but starting with the configured client number first_client */
+int  yt_streams_from(const char *id, int quality, int first_client, YtStreams *out, NetCtl *ctl);
 void yt_streams_free(YtStreams *s);
 
 /* parsing (exposed for tests) */

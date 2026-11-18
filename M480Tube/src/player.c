@@ -57,6 +57,8 @@ typedef struct {
 	char first_ctype[64];
 	unsigned char head[16];
 	int headlen;
+	char *oldurls[24];
+	int noldurls;
 	const char *name;
 } Src;
 
@@ -240,6 +242,7 @@ static void src_stop(Src *s)
 	DeleteCriticalSection(&s->cs);
 	free(s->ring);
 	free(s->url);
+	while (s->noldurls > 0) free(s->oldurls[--s->noldurls]);
 	s->ring = NULL;
 }
 
@@ -322,6 +325,32 @@ static int src_next_mode(Src *s, int config_post)
 	SetEvent(s->ev_space);
 	tube_log("%s: retry with request mode %d", s->name, s->mode);
 	return 1;
+}
+
+/* point the source at another URL (other format / client) and restart from 0 */
+static void src_switch_url(Src *s, const char *url, long size, const char *ua, int post, int rn)
+{
+	EnterCriticalSection(&s->cs);
+	if (s->noldurls < 24) s->oldurls[s->noldurls++] = s->url; /* the reader may still use it */
+	s->url = xstrdup(url);
+	s->orig_size = s->size = size > 0 ? size : -1;
+	if (ua) { strncpy(s->ua, ua, sizeof s->ua - 1); s->ua[sizeof s->ua - 1] = 0; }
+	s->post = post;
+	s->rn = rn;
+	s->rangeparam = 0;
+	s->mode = 0;
+	s->gen++;
+	s->restart_at = 0;
+	s->lo = s->hi = s->rp = 0;
+	s->eof = s->failed = 0;
+	s->first_status = 0;
+	s->first_ctype[0] = 0;
+	s->headlen = 0;
+	s->lasterr[0] = 0;
+	s->err[0] = 0;
+	s->downloaded = 0;
+	LeaveCriticalSection(&s->cs);
+	SetEvent(s->ev_space);
 }
 
 static void src_diag(Src *s, const char *fferr, char *out, int len)
@@ -442,6 +471,8 @@ struct Player {
 	int frames_since_seek;
 	int media_post;
 	char adiag[400];
+	YtStreams ys;      /* own copy: alternatives / client for video fallback */
+	int alt_next;
 };
 
 #define TB 30
@@ -1107,13 +1138,51 @@ static DWORD WINAPI video_thread(LPVOID arg)
 	int r0;
 
 	{
-		char diag[600], msg[700];
-		fc = open_fmt(&p->vs, p->media_post, &p->quit, diag, sizeof diag);
+		char diag[600], msg[1100], all[900] = "";
+		int vpost = p->media_post;
+		for (;;) {
+			char line[120];
+			int refused;
+			fc = open_fmt(&p->vs, vpost, &p->quit, diag, sizeof diag);
+			if (fc || p->quit) break;
+			refused = p->vs.first_status >= 400;
+			_snprintf(line, sizeof line, "%d: %s", p->vitag, diag);
+			line[sizeof line - 1] = 0;
+			{ char *nl = strchr(line, '\n'); if (nl) *nl = 0; }
+			if (strlen(all) + strlen(line) + 2 < sizeof all) { if (all[0]) strcat(all, "\n"); strcat(all, line); }
+			if (!refused) break;
+			/* the server refused this format: try the next one, then another client */
+			if (p->alt_next < p->ys.nalt) {
+				int k = p->alt_next++;
+				tube_log("video: itag %d refused, trying itag %d", p->vitag, p->ys.alt[k].itag);
+				p->vitag = p->ys.alt[k].itag;
+				if (p->ys.alt[k].w > 0) { EnterCriticalSection(&p->cs); p->srcw = p->ys.alt[k].w; p->srch = p->ys.alt[k].h; layout(p); LeaveCriticalSection(&p->cs); }
+				src_switch_url(&p->vs, p->ys.alt[k].url, p->ys.alt[k].size, NULL, p->ys.media_post, p->ys.media_rn);
+				continue;
+			} else {
+				YtStreams ns;
+				NetCtl ctl;
+				memset(&ctl, 0, sizeof ctl);
+				memset(&ns, 0, sizeof ns);
+				if (!p->ys.id[0] || !yt_streams_from(p->ys.id, p->ys.quality, p->ys.client_idx + 1, &ns, &ctl)) {
+					yt_streams_free(&ns);
+					break;
+				}
+				tube_log("video: switching to client %s", ns.client);
+				yt_streams_free(&p->ys);
+				p->ys = ns;
+				p->alt_next = 1;
+				vpost = ns.media_post;
+				p->vitag = ns.vitag;
+				strncpy(p->client, ns.client, sizeof p->client - 1);
+				src_switch_url(&p->vs, ns.vurl, ns.vsize, ns.ua, ns.media_post, ns.media_rn);
+			}
+		}
 		if (!fc) {
-			if (p->quit) return 0;
 			char st[260];
+			if (p->quit) return 0;
 			player_selftest(st, sizeof st);
-			_snprintf(msg, sizeof msg, "영상을 열 수 없습니다. 이 화면을 사진으로 보내 주세요.\n%s\n%s", diag, st);
+			_snprintf(msg, sizeof msg, "영상을 열 수 없습니다. 이 화면을 사진으로 보내 주세요.\n%s\n%s", all, st);
 			msg[sizeof msg - 1] = 0;
 			set_error(p, msg);
 			return 0;
@@ -1370,6 +1439,14 @@ Player *player_open(HWND hwnd, const YtStreams *s, int orientation, int show_sta
 	p->srch = s->h > 0 ? s->h : 240;
 	p->ori = orientation;
 	p->media_post = s->media_post;
+	{
+		int k;
+		p->ys = *s;
+		p->ys.title = NULL;
+		p->ys.vurl = p->ys.aurl = NULL;
+		for (k = 0; k < s->nalt; k++) p->ys.alt[k].url = xstrdup(s->alt[k].url);
+		p->alt_next = 1;
+	}
 	p->show_stats = show_stats;
 	p->state = PS_LOADING;
 	p->ovl = 1;
@@ -1419,6 +1496,7 @@ void player_close(Player *p)
 	if (p->fontb) DeleteObject(p->fontb);
 	free(p->vframe);
 	free(p->title);
+	yt_streams_free(&p->ys);
 	DeleteCriticalSection(&p->cs);
 	free(p);
 }

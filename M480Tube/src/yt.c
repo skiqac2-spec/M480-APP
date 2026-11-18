@@ -559,7 +559,7 @@ void yt_list_free(YtList *l)
 /* ------------------------------------------------------------------ */
 /* streams                                                             */
 /* ------------------------------------------------------------------ */
-typedef struct { int itag; const char *url, *mime; long size; int w, h; } Fmt;
+typedef struct { int itag; const char *url, *mime; long size; int w, h, deflang; } Fmt;
 
 static int collect_fmts(JNode *arr, Fmt *f, int n, int max)
 {
@@ -573,6 +573,16 @@ static int collect_fmts(JNode *arr, Fmt *f, int n, int max)
 		f[n].size = jnum(jget(c, "contentLength"), -1);
 		f[n].w = (int)jnum(jget(c, "width"), 0);
 		f[n].h = (int)jnum(jget(c, "height"), 0);
+		/* multi-language videos list one audio format per dub: 2 = original/default */
+		{
+			JNode *at = jget(c, "audioTrack");
+			JNode *def = jget(at, "audioIsDefault");
+			const char *dn = jpstr(at, "displayName");
+			const char *tid = jpstr(at, "id");
+			f[n].deflang = !at ? 1 : (def && def->bval) ? 2 : 0;
+			if (f[n].deflang == 0 && ((dn && (strstr(dn, "original") || strstr(dn, "\xEC\x9B\x90\xEB\xB3\xB8"))) || (tid && !strncmp(tid, "ko", 2))))
+				f[n].deflang = 1;
+		}
 		/* drop formats whose URL needs the "n" challenge (would be throttled/403) */
 		if (strstr(u, "&n=")) continue;
 		n++;
@@ -582,13 +592,15 @@ static int collect_fmts(JNode *arr, Fmt *f, int n, int max)
 
 static Fmt *pick(Fmt *f, int n, const int *pref, int npref, int want_audio)
 {
-	int i, j;
-	for (i = 0; i < npref; i++)
-		for (j = 0; j < n; j++)
-			if (f[j].itag == pref[i]) return &f[j];
+	int i, j, lv;
+	/* audio: prefer the original-language track */
+	for (lv = want_audio ? 2 : 0; lv >= 0; lv--)
+		for (i = 0; i < npref; i++)
+			for (j = 0; j < n; j++)
+				if (f[j].itag == pref[i] && f[j].deflang >= lv) return &f[j];
 	for (j = 0; j < n; j++) {
 		if (!f[j].mime) continue;
-		if (want_audio ? (strstr(f[j].mime, "mp4a") && strstr(f[j].mime, "audio/mp4")) :
+		if (want_audio ? (strstr(f[j].mime, "mp4a") && strstr(f[j].mime, "audio/mp4") && f[j].deflang) :
 		                 (strstr(f[j].mime, "avc1") && f[j].h > 0 && f[j].h <= 360)) return &f[j];
 	}
 	return NULL;
@@ -596,6 +608,8 @@ static Fmt *pick(Fmt *f, int n, const int *pref, int npref, int want_audio)
 
 void yt_streams_free(YtStreams *s)
 {
+	int i;
+	for (i = 0; i < s->nalt; i++) free(s->alt[i].url);
 	free(s->title); free(s->vurl); free(s->aurl);
 	memset(s, 0, sizeof *s);
 }
@@ -606,12 +620,14 @@ int yt_parse_player(const char *body, int len, int quality, YtStreams *out)
 	JDoc *d;
 	JNode *root, *sd, *live;
 	const char *st;
-	Fmt f[64];
+	Fmt *f;
 	int nf = 0;
 	Fmt *v, *a;
 	if (quality < 0 || quality > 2) quality = 0;
 	d = json_parse(body, len);
-	if (!d) { strcpy(out->err, "응답을 해석할 수 없음"); return 0; }
+	f = (Fmt *)malloc(400 * sizeof(Fmt));
+	if (!f) { json_free(d); strcpy(out->err, "메모리 부족"); return 0; }
+	if (!d) { strcpy(out->err, "응답을 해석할 수 없음"); { free(f); return 0; } }
 	root = json_root(d);
 	st = jpstr(root, "playabilityStatus.status");
 	if (!st || strcmp(st, "OK")) {
@@ -619,23 +635,49 @@ int yt_parse_player(const char *body, int len, int quality, YtStreams *out)
 		if (!why) why = jpstr(root, "playabilityStatus.messages.0");
 		_snprintf(out->err, sizeof out->err, "재생 불가: %s", why ? why : (st ? st : "알 수 없음"));
 		json_free(d);
-		return 0;
+		{ free(f); return 0; }
 	}
 	live = jpath(root, "videoDetails.isLive");
 	if (live && live->bval) {
 		strcpy(out->err, "실시간 방송은 지원하지 않습니다");
 		json_free(d);
-		return -1;
+		{ free(f); return -1; }
 	}
 	sd = jget(root, "streamingData");
-	nf = collect_fmts(jget(sd, "adaptiveFormats"), f, nf, 64);
-	nf = collect_fmts(jget(sd, "formats"), f, nf, 64);
+	nf = collect_fmts(jget(sd, "adaptiveFormats"), f, nf, 400);
+	nf = collect_fmts(jget(sd, "formats"), f, nf, 400);
 	v = pick(f, nf, g_vpref[quality], g_nvpref[quality], 0);
 	a = pick(f, nf, g_apref, g_napref, 1);
 	if (!v) {
 		strcpy(out->err, nf ? "재생 가능한 H.264 영상 형식이 없음" : "영상 주소를 받지 못함 (암호화된 형식)");
 		json_free(d);
-		return 0;
+		{ free(f); return 0; }
+	}
+	/* alternatives: preferred formats in order, then any other usable H.264 up to 360p */
+	{
+		int i, j, k;
+		Fmt *cand[16];
+		int nc = 0;
+		cand[nc++] = v;
+		for (i = 0; i < g_nvpref[quality] && nc < 16; i++)
+			for (j = 0; j < nf && nc < 16; j++)
+				if (f[j].itag == g_vpref[quality][i]) {
+					for (k = 0; k < nc && cand[k] != &f[j]; k++) {}
+					if (k == nc) cand[nc++] = &f[j];
+				}
+		for (j = 0; j < nf && nc < 16; j++)
+			if (f[j].mime && strstr(f[j].mime, "avc1") && f[j].h > 0 && f[j].h <= 360) {
+				for (k = 0; k < nc && cand[k] != &f[j]; k++) {}
+				if (k == nc) cand[nc++] = &f[j];
+			}
+		for (i = 0; i < nc && out->nalt < 8; i++) {
+			out->alt[out->nalt].url = xstrdup(cand[i]->url);
+			out->alt[out->nalt].size = cand[i]->size;
+			out->alt[out->nalt].itag = cand[i]->itag;
+			out->alt[out->nalt].w = cand[i]->w;
+			out->alt[out->nalt].h = cand[i]->h;
+			out->nalt++;
+		}
 	}
 	out->vurl = xstrdup(v->url);
 	out->vsize = v->size;
@@ -648,7 +690,7 @@ int yt_parse_player(const char *body, int len, int quality, YtStreams *out)
 	out->title = xstrdup(st ? st : "");
 	out->dur_ms = jnum(jpath(root, "videoDetails.lengthSeconds"), 0) * 1000;
 	json_free(d);
-	return 1;
+	{ free(f); return 1; }
 }
 
 static int fetch_visitor(Client *c, NetCtl *ctl, char *err, int errlen)
@@ -683,6 +725,11 @@ static char *add_param(char *url, const char *name, const char *val)
 
 int yt_streams(const char *id, int quality, YtStreams *out, NetCtl *ctl)
 {
+	return yt_streams_from(id, quality, 0, out, ctl);
+}
+
+int yt_streams_from(const char *id, int quality, int first_client, YtStreams *out, NetCtl *ctl)
+{
 	int ci, n;
 	char lasterr[400] = "";
 	Client *cl;
@@ -692,7 +739,7 @@ int yt_streams(const char *id, int quality, YtStreams *out, NetCtl *ctl)
 	cl = (Client *)malloc(sizeof(Client) * (n ? n : 1));
 	memcpy(cl, g_player, sizeof(Client) * n);
 	LeaveCriticalSection(&g_ycs);
-	for (ci = 0; ci < n; ci++) {
+	for (ci = first_client; ci < n; ci++) {
 		Client *c = &cl[ci];
 		Buf body;
 		HttpResp r;
@@ -729,9 +776,14 @@ int yt_streams(const char *id, int quality, YtStreams *out, NetCtl *ctl)
 			http_resp_free(&r);
 			if (res == 1) {
 				if (c->media_cpn) {
+					int k;
 					out->vurl = add_param(out->vurl, "cpn", cpn);
 					if (out->aurl) out->aurl = add_param(out->aurl, "cpn", cpn);
+					for (k = 0; k < out->nalt; k++) out->alt[k].url = add_param(out->alt[k].url, "cpn", cpn);
 				}
+				out->client_idx = ci;
+				strncpy(out->id, id, sizeof out->id - 1);
+				out->quality = quality;
 				strncpy(out->ua, c->ua, sizeof out->ua - 1);
 				_snprintf(out->client, sizeof out->client, "%s %s", c->name, c->ver);
 				out->media_post = c->media_post;
