@@ -19,7 +19,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "1.0"
+#define VERSION   "1.1"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -827,7 +827,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		case M_STATS: g_stats = !g_stats; settings_save(); return 0;
 		case M_UPDATE: status_set("설정을 받는 중..."); start_config_update(1); return 0;
 		case M_ABOUT:
-			MessageBoxW(h, L"M480Tube 1.0\nSCH-M480용 유튜브 뷰어\n\n"
+			MessageBoxW(h, L"M480Tube 1.1\nSCH-M480용 유튜브 뷰어\n\n"
 			            L"유튜브가 바뀌어 재생이 안 되면 메뉴의 '유튜브 연결 설정 다시 받기'를 눌러 보세요.\n"
 			            L"문제가 계속되면 프로그램 폴더의 m480tube_log.txt 내용을 알려 주세요.", APPNAME, MB_OK);
 			return 0;

@@ -17,6 +17,7 @@ typedef struct {
 	char  tlsinfo[96];
 	void *sink;        /* FILE* the body was streamed into (NULL = in body) */
 	long  streamed;    /* bytes written to sink */
+	DWORD date;        /* Date header (unix time), 0 if none */
 } HttpResp;
 
 typedef struct {

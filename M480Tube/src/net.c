@@ -4,6 +4,7 @@
 #include "net.h"
 #include "url.h"
 #include "bearssl.h"
+#include "tubelog.h"
 #include <stdio.h>
 
 #ifdef M480_TEST_TA
@@ -18,6 +19,10 @@
 static char g_auth_host[128], g_auth_token[160];
 static char g_ua[256] = "Opera/9.80 (Windows Mobile; Opera Mini/7.1.32052/191.256; U; ko) Presto/2.12.423 Version/12.16";
 static CRITICAL_SECTION g_cs;
+/* correction for a wrong device clock (seconds), learned from a server's Date header */
+static volatile long g_time_ofs;
+static volatile int g_time_synced;
+static DWORD parse_http_date(const char *s);
 static int g_inited;
 
 /* ------------------------------------------------------------------ */
@@ -368,7 +373,7 @@ static int conn_open(Conn *c, const Url *u, NetCtl *ctl, HttpResp *resp)
 	if (strcmp(u->scheme, "https") == 0) {
 		unsigned char seed[32];
 		br_ssl_session_parameters sp;
-		DWORD t = now_unix();
+		DWORD t = now_unix() + g_time_ofs;
 		int resume;
 		c->tls = 1;
 		br_ssl_client_init_full(&c->sc, &c->xc, TAs, TAs_NUM);
@@ -870,6 +875,7 @@ static int do_one(const char *url, const char *method, const char *body, int bod
 		else if (strieq(line.p, "set-cookie")) set_cookie(&u, v);
 		else if (strieq(line.p, "refresh")) { free(r->refresh); r->refresh = xstrdup(v); }
 		else if (strieq(line.p, "content-disposition")) { free(r->disposition); r->disposition = xstrdup(v); }
+		else if (strieq(line.p, "date")) r->date = parse_http_date(v);
 	}
 	buf_free(&line);
 	ok = 1;
@@ -892,6 +898,36 @@ done:
 	return ok;
 }
 
+static int is_time_err(int e) { return e == BR_ERR_X509_EXPIRED || e == BR_ERR_X509_TIME_UNKNOWN; }
+
+/* The phone's clock may be wrong (old battery etc.), which makes every certificate
+   look expired. Learn the real time from a plain-HTTP Date header and retry. */
+static int time_sync(NetCtl *ctl)
+{
+	static const char *urls[] = { "http://www.google.com/generate_204", "http://clients3.google.com/generate_204", "http://www.msftconnecttest.com/connecttest.txt" };
+	int i;
+	if (g_time_synced) return 0;
+	g_time_synced = 1;
+	for (i = 0; i < 3; i++) {
+		HttpResp r;
+		char *loc = NULL;
+		memset(&r, 0, sizeof r);
+		if (do_one(urls[i], "GET", NULL, 0, NULL, NULL, &r, ctl, 65536, &loc) && r.date > 1600000000UL) {
+			long ofs = (long)(r.date - now_unix());
+			g_time_ofs = ofs;
+			tube_log("clock: device %lu, server %lu, offset %ld s", (unsigned long)now_unix(), (unsigned long)r.date, ofs);
+			free(loc);
+			http_resp_free(&r);
+			return 1;
+		}
+		free(loc);
+		http_resp_free(&r);
+	}
+	tube_log("clock: time sync failed");
+	g_time_synced = 0;
+	return 0;
+}
+
 int http_request(const char *url, const char *method, const char *body, int bodylen,
                  const char *ctype, const char *referer, HttpResp *r, NetCtl *ctl, int maxbytes)
 {
@@ -908,6 +944,12 @@ int http_request(const char *url, const char *method, const char *body, int body
 		HttpResp tmp;
 		memset(&tmp, 0, sizeof tmp);
 		ok = do_one(cur, meth, body, bodylen, ctype, ref, &tmp, ctl, maxbytes, &loc);
+		if (!ok && is_time_err(tmp.certerr) && time_sync(ctl)) {
+			free(loc); loc = NULL;
+			http_resp_free(&tmp);
+			memset(&tmp, 0, sizeof tmp);
+			ok = do_one(cur, meth, body, bodylen, ctype, ref, &tmp, ctl, maxbytes, &loc);
+		}
 		if (ok && loc && tmp.status >= 300 && tmp.status < 400 && tmp.status != 304) {
 			char *next = url_resolve(cur, loc);
 			free(loc);
@@ -948,6 +990,7 @@ struct HStream {
 	long total;
 	int post, rn;
 	long reqno;
+	int certerr;
 	char err[200];
 };
 
@@ -1040,7 +1083,7 @@ static int hs_one(HStream *h, const Url *u, long start, long end, char **locatio
 	buf_adds(&req, "Connection: keep-alive\r\n\r\n");
 	if (h->post) buf_add(&req, "x\0", 2);
 	if (!conn_write(h->c, req.p, req.len) || !conn_flush(h->c)) {
-		if (h->tls) { HttpResp t; memset(&t, 0, sizeof t); tls_fail(h->c, &t, u); strncpy(h->err, t.err, sizeof h->err - 1); }
+		if (h->tls) { HttpResp t; memset(&t, 0, sizeof t); tls_fail(h->c, &t, u); strncpy(h->err, t.err, sizeof h->err - 1); h->certerr = t.certerr; }
 		else strcpy(h->err, "요청 전송 실패");
 		goto fail;
 	}
@@ -1120,8 +1163,10 @@ int hs_get(HStream *h, const char *url0, long start, long end)
 		char *loc = NULL;
 		int st, retry_ok, attempt;
 		if (!url_parse(cur, &u)) { strcpy(h->err, "잘못된 주소"); free(cur); return 0; }
-		for (attempt = 0; attempt < 2; attempt++) {
+		for (attempt = 0; attempt < 3; attempt++) {
+			h->certerr = 0;
 			st = hs_one(h, &u, start, end, &loc, &retry_ok);
+			if (!st && is_time_err(h->certerr) && time_sync(h->ctl)) { hs_close_conn(h); continue; }
 			if (st || !retry_ok || (h->ctl && h->ctl->abort)) break;
 			hs_close_conn(h); /* stale keep-alive connection: reconnect once */
 		}
