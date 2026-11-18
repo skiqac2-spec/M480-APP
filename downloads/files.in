@@ -5,7 +5,7 @@
 M480Web/M480Web.cab	-	설치 파일 - 누르면 설치 (설치 중 브라우저가 종료됨)
 M480Web/M480Web.exe	-	설치 없이 쓰는 실행 파일
 M480Web/README.txt	-	사용 설명서
-@AbyssLabyrinth	심연의 미궁 (1인칭 던전 RPG)	2026-11-18 (4) 정사각형 화면 꽉 채움
+@AbyssLabyrinth	심연의 미궁 (1인칭 던전 RPG)	2026-11-18 (5) 물리 키 단축키
 AbyssLabyrinth/Abyss_WM61.exe	-	게임 실행 파일
 ../AbyssLabyrinth/data/abyss_mon.dat	-	몬스터 그래픽 46MB (exe와 같은 폴더)	AbyssLabyrinth/abyss_mon.dat
 ../AbyssLabyrinth/data/abyss_hero.dat	-	주인공 장비별 그래픽 17MB (exe와 같은 폴더)	AbyssLabyrinth/abyss_hero.dat
