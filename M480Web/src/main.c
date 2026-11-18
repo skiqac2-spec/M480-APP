@@ -421,9 +421,13 @@ static Doc *error_page(const char *url, const char *msg)
 	h_esc(&b, url);
 	buf_adds(&b, "</small></p><ul><li><a href=\"");
 	h_esc(&b, url);
-	buf_adds(&b, "\">\xEB\x8B\xA4\xEC\x8B\x9C \xEC\x8B\x9C\xEB\x8F\x84</a><li><a href=\"http://frogfind.com/read.php?a=");
-	buf_adds(&b, ue);
-	buf_adds(&b, "\">\xEB\x8B\xA8\xEC\x88\x9C\xED\x99\x94 \xEB\xB3\xB4\xEA\xB8\xB0(FrogFind)\xEB\xA1\x9C \xEC\x97\xB4\xEA\xB8\xB0</a><li><a href=\"about:home\">\xED\x99\x88</a></ul>");
+	buf_adds(&b, "\">\xEB\x8B\xA4\xEC\x8B\x9C \xEC\x8B\x9C\xEB\x8F\x84</a>");
+	if (strncmp(url, "about:", 6)) {
+		buf_adds(&b, "<li><a href=\"http://frogfind.com/read.php?a=");
+		buf_adds(&b, ue);
+		buf_adds(&b, "\">\xEB\x8B\xA8\xEC\x88\x9C\xED\x99\x94 \xEB\xB3\xB4\xEA\xB8\xB0(FrogFind)\xEB\xA1\x9C \xEC\x97\xB4\xEA\xB8\xB0</a>");
+	}
+	buf_adds(&b, "<li><a href=\"about:home\">\xED\x99\x88</a></ul>");
 	free(ue);
 	d = html_parse(b.p, b.len, url, "utf-8", 0);
 	buf_free(&b);
@@ -1053,7 +1057,7 @@ static void on_loaded(Job *j)
 				strcpy(msg, "파일 목록을 찾을 수 없습니다 (404). 저장소가 비공개라면 '파일함 설정'에서 GitHub 토큰을 넣어 주세요.");
 			else if (j->resp.err[0]) _snprintf(msg, sizeof msg, "%s", j->resp.err);
 			else _snprintf(msg, sizeof msg, "HTTP %d", j->resp.status);
-			install_doc(error_page(j->url, msg), j->mode == NAV_NEW ? NAV_NEW : NAV_RELOAD, NULL);
+			install_doc(error_page("about:files", msg), j->mode == NAV_NEW ? NAV_NEW : NAV_RELOAD, NULL);
 		}
 		job_free(j);
 		return;
@@ -1252,7 +1256,7 @@ network:
 	j->ctl.ctx = j;
 	j->ctl.sock = (unsigned int)INVALID_SOCKET;
 	j->qidx = -1;
-	if (!strcmp(url, "about:files")) {
+	if (!strcmp(url, "about:files") || !strcmp(url, g_repo)) {
 		free(j->url);
 		j->url = xstrdup(g_repo);
 		j->files = 1;

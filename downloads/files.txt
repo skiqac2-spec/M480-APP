@@ -1,8 +1,8 @@
 # M480-APP 파일 목록 (M480Web '내 파일함'이 읽음)
 # 형식: @그룹ID<TAB>제목<TAB>날짜  /  파일경로(이 폴더 기준)<TAB>크기(자동)<TAB>설명<TAB>휴대폰에 저장될 경로(생략 가능)
 # files.txt 는 tools/update_manifest.py 가 이 파일로부터 만든다.
-@M480Web	M480Web 웹 브라우저 (TLS 1.2)	2026-11-18
-M480Web/M480Web.cab	303243	설치 파일 - 누르면 설치 (설치 중 브라우저가 종료됨)
+@M480Web	M480Web 웹 브라우저 (TLS 1.2)	2026-11-18 (2)
+M480Web/M480Web.cab	303314	설치 파일 - 누르면 설치 (설치 중 브라우저가 종료됨)
 M480Web/M480Web.exe	484352	설치 없이 쓰는 실행 파일
 M480Web/README.txt	3947	사용 설명서
 @AbyssLabyrinth	심연의 미궁 (1인칭 던전 RPG)	2026-11-18
