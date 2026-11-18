@@ -15,7 +15,7 @@ AbyssLabyrinth/Abyss_WM61.exe	151552	게임 실행 파일
 M480Music/M480Music.cab	49956	설치 파일 - 누르면 설치
 M480Music/M480Music.exe	76288	설치 없이 쓰는 실행 파일
 M480Music/README.txt	3393	사용 설명서
-@M480Tube	M480Tube 유튜브 뷰어 1.5	2026-11-18
-M480Tube/M480Tube.cab	1266617	설치 파일 - 누르면 설치
-M480Tube/M480Tube.exe	2698752	설치 없이 쓰는 실행 파일
+@M480Tube	M480Tube 유튜브 뷰어 1.6	2026-11-18
+M480Tube/M480Tube.cab	1266204	설치 파일 - 누르면 설치
+M480Tube/M480Tube.exe	2701312	설치 없이 쓰는 실행 파일
 M480Tube/README.txt	2084	사용 설명서
