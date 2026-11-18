@@ -43,6 +43,7 @@ typedef struct {
 	long restart_at;
 	int eof, failed, starving;
 	char err[200];
+	char lasterr[160];
 	volatile int quit;
 	volatile int intr;    /* interrupt blocked reads (seek requested) */
 	long downloaded;
@@ -131,6 +132,10 @@ static DWORD WINAPI src_thread(LPVOID arg)
 			} else {
 				fails++;
 				tube_log("%s: HTTP %d at %ld (%s)", s->name, st, pos, hs_err(hs));
+				EnterCriticalSection(&s->cs);
+				_snprintf(s->lasterr, sizeof s->lasterr, "%s", hs_err(hs));
+				s->lasterr[sizeof s->lasterr - 1] = 0;
+				LeaveCriticalSection(&s->cs);
 				if (fails >= 5 || st == 403 || st == 404 || st == 410 || (st == 200 && pos > 0) || (st >= 400 && st < 500)) {
 					EnterCriticalSection(&s->cs);
 					if (s->gen == mygen) {
@@ -309,6 +314,7 @@ static int src_next_mode(Src *s, int config_post)
 	s->first_status = 0;
 	s->first_ctype[0] = 0;
 	s->headlen = 0;
+	s->lasterr[0] = 0;
 	s->size = s->orig_size;
 	s->downloaded = 0;
 	s->err[0] = 0;
@@ -327,8 +333,8 @@ static void src_diag(Src *s, const char *fferr, char *out, int len)
 		hx[i] = (ch >= 32 && ch < 127) ? (char)ch : '.';
 	}
 	hx[n] = 0;
-	_snprintf(out, len, "[%d] HTTP %d %s, %ldB '%s' %s%s", s->mode, s->first_status, s->first_ctype,
-	          s->downloaded, hx, fferr, s->failed ? s->err : "");
+	_snprintf(out, len, "[%d] HTTP %d %s, %ldB '%s' %s / %s", s->mode, s->first_status, s->first_ctype,
+	          s->downloaded, hx, fferr, s->failed ? s->err : s->lasterr);
 	out[len - 1] = 0;
 	tube_log("%s diag: %s", s->name, out);
 }

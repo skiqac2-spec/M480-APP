@@ -1095,7 +1095,9 @@ static int hs_one(HStream *h, const Url *u, long start, long end, char **locatio
 	}
 	buf_init(&req);
 	buf_init(&line);
-	buf_addf(&req, "%s %s HTTP/1.1\r\n", h->post ? "POST" : "GET", u->path);
+	buf_adds(&req, h->post ? "POST " : "GET ");
+	buf_adds(&req, u->path);
+	buf_adds(&req, " HTTP/1.1\r\n");
 	if ((u->port == 443 && h->tls) || (u->port == 80 && !h->tls)) buf_addf(&req, "Host: %s\r\n", u->host);
 	else buf_addf(&req, "Host: %s:%d\r\n", u->host, u->port);
 	buf_addf(&req, "User-Agent: %s\r\n", (h->ctl && h->ctl->ua) ? h->ctl->ua : g_ua);

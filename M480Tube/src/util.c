@@ -33,13 +33,31 @@ void buf_addf(Buf *b, const char *fmt, ...)
 {
 	char tmp[1024];
 	va_list ap;
-	int n;
+	int n, cap;
 	va_start(ap, fmt);
 	n = _vsnprintf(tmp, sizeof tmp - 1, fmt, ap);
 	va_end(ap);
-	if (n < 0) n = sizeof tmp - 1;
-	tmp[n] = 0;
-	buf_add(b, tmp, n);
+	if (n >= 0 && n < (int)sizeof tmp - 1) {
+		tmp[n] = 0;
+		buf_add(b, tmp, n);
+		return;
+	}
+	/* long output (e.g. ~1-2 KB video URLs): retry with a bigger heap buffer */
+	for (cap = 8192; cap <= 262144; cap *= 4) {
+		char *big = (char *)malloc(cap);
+		if (!big) break;
+		va_start(ap, fmt);
+		n = _vsnprintf(big, cap - 1, fmt, ap);
+		va_end(ap);
+		if (n >= 0 && n < cap - 1) {
+			buf_add(b, big, n);
+			free(big);
+			return;
+		}
+		free(big);
+	}
+	tmp[sizeof tmp - 1] = 0;
+	buf_add(b, tmp, (int)strlen(tmp));
 }
 
 char *buf_detach(Buf *b)
