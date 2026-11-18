@@ -62,7 +62,8 @@ int  hs_get(HStream *h, const char *url, long start, long end);
 int  hs_read(HStream *h, unsigned char *buf, int n);
 long hs_total(HStream *h);
 /* media fetch quirks: POST with body "x\\0" instead of GET, append &rn=<n> */
-void hs_options(HStream *h, int post, int rn);   /* total size from Content-Range, -1 unknown */
+void hs_options(HStream *h, int post, int rn, int rangeparam);
+const char *hs_ctype(HStream *h);   /* total size from Content-Range, -1 unknown */
 const char *hs_err(HStream *h);
 void hs_free(HStream *h);
 

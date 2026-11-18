@@ -1010,13 +1010,15 @@ struct HStream {
 	long chunk_left;     /* chunked: bytes left in current chunk, -1 = need size line */
 	int body_done;
 	long total;
-	int post, rn;
+	int post, rn, rangeparam;
 	long reqno;
 	int certerr;
+	char ctype[64];
 	char err[200];
 };
 
-void hs_options(HStream *h, int post, int rn) { h->post = post; h->rn = rn; }
+void hs_options(HStream *h, int post, int rn, int rangeparam) { h->post = post; h->rn = rn; h->rangeparam = rangeparam; }
+const char *hs_ctype(HStream *h) { return h->ctype; }
 
 HStream *hs_new(NetCtl *ctl)
 {
@@ -1068,6 +1070,7 @@ static int hs_one(HStream *h, const Url *u, long start, long end, char **locatio
 	*location = NULL;
 	*retry_ok = 0;
 	h->chunked = 0;
+	h->ctype[0] = 0;
 	h->chunk_left = -1;
 	h->remain = -1;
 	h->body_done = 0;
@@ -1099,8 +1102,10 @@ static int hs_one(HStream *h, const Url *u, long start, long end, char **locatio
 	buf_adds(&req, "Accept: */*\r\n");
 	if (h->ctl && h->ctl->hdrs) buf_adds(&req, h->ctl->hdrs);
 	fmt_long(a, start);
-	if (end >= 0) { fmt_long(b, end); buf_addf(&req, "Range: bytes=%s-%s\r\n", a, b); }
+	if (h->rangeparam) {}
+	else if (end >= 0) { fmt_long(b, end); buf_addf(&req, "Range: bytes=%s-%s\r\n", a, b); }
 	else if (start > 0) buf_addf(&req, "Range: bytes=%s-\r\n", a);
+	buf_adds(&req, "Accept-Encoding: identity\r\nTE: trailers\r\n");
 	if (h->post) buf_adds(&req, "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 2\r\n");
 	buf_adds(&req, "Connection: keep-alive\r\n\r\n");
 	if (h->post) buf_add(&req, "x\0", 2);
@@ -1132,6 +1137,7 @@ static int hs_one(HStream *h, const Url *u, long start, long end, char **locatio
 		else if (strieq(line.p, "transfer-encoding")) { if (stristr(v, "chunked")) h->chunked = 1; }
 		else if (strieq(line.p, "connection")) { if (stristr(v, "close")) conn_close_hdr = 1; }
 		else if (strieq(line.p, "location")) { free(*location); *location = xstrdup(v); }
+		else if (strieq(line.p, "content-type")) { strncpy(h->ctype, v, sizeof h->ctype - 1); h->ctype[sizeof h->ctype - 1] = 0; }
 		else if (strieq(line.p, "content-range")) {
 			const char *sl = strchr(v, '/');
 			if (sl && sl[1] != '*') h->total = atol(sl + 1);
@@ -1169,12 +1175,19 @@ int hs_get(HStream *h, const char *url0, long start, long end)
 {
 	char *cur;
 	int hops;
+	cur = (char *)malloc(strlen(url0) + 64);
+	strcpy(cur, url0);
 	if (h->rn) {
 		char n[16];
 		fmt_long(n, h->reqno++);
-		cur = (char *)malloc(strlen(url0) + 24);
-		sprintf(cur, "%s%crn=%s", url0, strchr(url0, '?') ? '&' : '?', n);
-	} else cur = xstrdup(url0);
+		sprintf(cur + strlen(cur), "%crn=%s", strchr(cur, '?') ? '&' : '?', n);
+	}
+	if (h->rangeparam) {
+		char a[16], b[16];
+		fmt_long(a, start);
+		if (end >= 0) fmt_long(b, end); else b[0] = 0;
+		sprintf(cur + strlen(cur), "%crange=%s-%s", strchr(cur, '?') ? '&' : '?', a, b);
+	}
 	h->err[0] = 0;
 	if (!h->body_done) {
 		if (h->remain > 0 && h->remain <= 65536) hs_drain(h);

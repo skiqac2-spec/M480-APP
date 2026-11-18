@@ -35,6 +35,7 @@
 typedef struct {
 	char *url;
 	long size;            /* -1 unknown */
+	long orig_size;
 	unsigned char *ring;
 	long cap, keep, chunk;
 	long lo, hi, rp;      /* file offsets: buffered [lo,hi), read position rp */
@@ -49,16 +50,25 @@ typedef struct {
 	HANDLE ev_data, ev_space, th;
 	NetCtl ctl;
 	char ua[320];
-	int post, rn;
+	int post, rn, rangeparam;
+	int mode;             /* request style being tried */
+	int first_status;     /* status of the response starting at offset 0 */
+	char first_ctype[64];
+	unsigned char head[16];
+	int headlen;
 	const char *name;
 } Src;
+
+/* serialises FFmpeg (de)muxer/codec setup: built without thread support */
+static CRITICAL_SECTION g_ffcs;
+static int g_ffcs_init;
 
 static DWORD WINAPI src_thread(LPVOID arg)
 {
 	Src *s = (Src *)arg;
 	HStream *hs = hs_new(&s->ctl);
 	long pos = 0, req_len = 0, resp_got = 0;
-	if (hs) hs_options(hs, s->post, s->rn);
+
 	int active = 0, fails = 0;
 	LONG mygen;
 	if (!hs) { s->failed = 1; strcpy(s->err, "메모리 부족"); SetEvent(s->ev_data); return 0; }
@@ -97,9 +107,19 @@ static DWORD WINAPI src_thread(LPVOID arg)
 			long end = pos + s->chunk - 1;
 			int st;
 			if (s->size >= 0 && end >= s->size) end = s->size - 1;
+			hs_options(hs, s->post, s->rn, s->rangeparam);
 			st = hs_get(hs, s->url, pos, end);
 			if (s->quit) break;
-			if (st == 206 || (st == 200 && pos == 0)) {
+			if (pos == 0) {
+				EnterCriticalSection(&s->cs);
+				if (s->gen == mygen) {
+					s->first_status = st;
+					strncpy(s->first_ctype, hs_ctype(hs), sizeof s->first_ctype - 1);
+				}
+				LeaveCriticalSection(&s->cs);
+				tube_log("%s: mode %d first response HTTP %d %s", s->name, s->mode, st, hs_ctype(hs));
+			}
+			if (st == 206 || (st == 200 && (pos == 0 || s->rangeparam))) {
 				if (s->size < 0) {
 					long t = hs_total(hs);
 					if (t > 0) { EnterCriticalSection(&s->cs); s->size = t; LeaveCriticalSection(&s->cs); }
@@ -111,7 +131,7 @@ static DWORD WINAPI src_thread(LPVOID arg)
 			} else {
 				fails++;
 				tube_log("%s: HTTP %d at %ld (%s)", s->name, st, pos, hs_err(hs));
-				if (fails >= 5 || st == 403 || st == 404 || st == 410 || (st == 200 && pos > 0)) {
+				if (fails >= 5 || st == 403 || st == 404 || st == 410 || (st == 200 && pos > 0) || (st >= 400 && st < 500)) {
 					EnterCriticalSection(&s->cs);
 					if (s->gen == mygen) {
 						s->failed = 1;
@@ -132,7 +152,15 @@ static DWORD WINAPI src_thread(LPVOID arg)
 		r = hs_read(hs, s->ring + idx, (int)n);
 		if (r > 0) {
 			EnterCriticalSection(&s->cs);
-			if (s->gen == mygen && s->restart_at < 0) { s->hi += r; s->downloaded += r; }
+			if (s->gen == mygen && s->restart_at < 0) {
+				if (pos < 16 && s->headlen < 16) {
+					int k;
+					for (k = 0; k < r && pos + k < 16; k++) s->head[pos + k] = s->ring[(idx + k) % s->cap];
+					if (pos + k > s->headlen) s->headlen = (int)(pos + k);
+				}
+				s->hi += r;
+				s->downloaded += r;
+			}
 			LeaveCriticalSection(&s->cs);
 			pos += r;
 			resp_got += r;
@@ -167,8 +195,11 @@ static int src_start(Src *s, const YtStreams *ys, const char *url, long size, lo
 	memset(s, 0, sizeof *s);
 	s->post = ys->media_post;
 	s->rn = ys->media_rn;
+	s->rangeparam = 0;
+	s->mode = 0;
 	s->url = xstrdup(url);
 	s->size = size > 0 ? size : -1;
+	s->orig_size = s->size;
 	s->cap = cap;
 	s->keep = 192 * 1024;
 	s->chunk = (long)g_tune.chunk_kb * 1024;
@@ -259,7 +290,50 @@ static int64_t src_seek(void *opaque, int64_t off, int whence)
 	return target;
 }
 
-static AVFormatContext *open_fmt(Src *s)
+/* restart the download from the start using another request style.
+   returns 0 when all styles were tried */
+static int src_next_mode(Src *s, int config_post)
+{
+	EnterCriticalSection(&s->cs);
+	s->mode++;
+	switch (s->mode) {
+	case 1: s->post = !config_post; s->rangeparam = 0; break;  /* other method, Range header */
+	case 2: s->post = 1; s->rangeparam = 1; break;             /* POST + &range= */
+	case 3: s->post = 0; s->rangeparam = 1; break;             /* GET + &range= */
+	default: LeaveCriticalSection(&s->cs); return 0;
+	}
+	s->gen++;
+	s->restart_at = 0;
+	s->lo = s->hi = s->rp = 0;
+	s->eof = s->failed = 0;
+	s->first_status = 0;
+	s->first_ctype[0] = 0;
+	s->headlen = 0;
+	s->size = s->orig_size;
+	s->downloaded = 0;
+	s->err[0] = 0;
+	LeaveCriticalSection(&s->cs);
+	SetEvent(s->ev_space);
+	tube_log("%s: retry with request mode %d", s->name, s->mode);
+	return 1;
+}
+
+static void src_diag(Src *s, const char *fferr, char *out, int len)
+{
+	char hx[40];
+	int i, n = s->headlen > 12 ? 12 : s->headlen;
+	for (i = 0; i < n; i++) {
+		unsigned char ch = s->head[i];
+		hx[i] = (ch >= 32 && ch < 127) ? (char)ch : '.';
+	}
+	hx[n] = 0;
+	_snprintf(out, len, "[%d] HTTP %d %s, %ldB '%s' %s%s", s->mode, s->first_status, s->first_ctype,
+	          s->downloaded, hx, fferr, s->failed ? s->err : "");
+	out[len - 1] = 0;
+	tube_log("%s diag: %s", s->name, out);
+}
+
+static AVFormatContext *open_fmt_once(Src *s, char *fferr, int errlen)
 {
 	AVFormatContext *fc = avformat_alloc_context();
 	unsigned char *b;
@@ -273,14 +347,31 @@ static AVFormatContext *open_fmt(Src *s)
 	fc->flags |= AVFMT_FLAG_CUSTOM_IO;
 	r = avformat_open_input(&fc, NULL, av_find_input_format("mov"), NULL);
 	if (r < 0) {
-		char e[64];
-		av_strerror(r, e, sizeof e);
-		tube_log("%s: open failed: %s", s->name, e);
+		av_strerror(r, fferr, errlen);
+		tube_log("%s: open failed: %s", s->name, fferr);
 		av_freep(&io->buffer);
 		avio_context_free(&io);
 		return NULL;
 	}
 	return fc;
+}
+
+/* opens the demuxer, trying other request styles if the server's answer is not usable */
+static AVFormatContext *open_fmt(Src *s, int config_post, volatile int *quit, char *diag, int diaglen)
+{
+	char all[600] = "";
+	for (;;) {
+		char fferr[64] = "", d[200];
+		AVFormatContext *fc = open_fmt_once(s, fferr, sizeof fferr);
+		if (fc) return fc;
+		if (*quit) return NULL;
+		src_diag(s, fferr, d, sizeof d);
+		if (strlen(all) + strlen(d) + 2 < sizeof all) { if (all[0]) strcat(all, "\n"); strcat(all, d); }
+		if (!src_next_mode(s, config_post)) break;
+	}
+	strncpy(diag, all, diaglen - 1);
+	diag[diaglen - 1] = 0;
+	return NULL;
 }
 
 static void close_fmt(AVFormatContext **fc)
@@ -306,7 +397,7 @@ struct Player {
 	HANDLE vth, ath;
 	volatile int quit;
 	volatile int state;
-	char msg[300];
+	char msg[800];
 	volatile int paused;
 	volatile LONG seek_gen;
 	volatile long seek_ms;
@@ -342,6 +433,8 @@ struct Player {
 	int fps, fcount, dropped;
 	DWORD ftick;
 	int frames_since_seek;
+	int media_post;
+	char adiag[400];
 };
 
 #define TB 30
@@ -566,7 +659,7 @@ static long cur_pos(Player *p)
 static void draw_overlay(Player *p, HDC dc)
 {
 	RECT rc, rew, play, fwd, track;
-	char t1[24], t2[24], line[200];
+	char t1[24], t2[24], line[900];
 	int y = bottom_y(p);
 	long pos = cur_pos(p);
 	const char *st = "";
@@ -648,6 +741,10 @@ static void draw_overlay(Player *p, HDC dc)
 			SetTextColor(dc, RGB(255, 120, 120));
 			text_u8(dc, p->msg, &rc, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
 		} else {
+			if (p->audio_dead && p->adiag[0])
+				_snprintf(line, sizeof line, "%s\n\n화질 %dp (영상 %d / 음성 %d)\n받은 데이터 %ld KB\n\n소리 오류:\n%s",
+				          p->title, p->srch, p->vitag, p->aitag, (p->vs.downloaded + p->as.downloaded) / 1024, p->adiag);
+			else
 			_snprintf(line, sizeof line, "%s\n\n화질 %dp (영상 %d / 음성 %d)\n받은 데이터 %ld KB\n\n좌우 버튼: 10초 이동\n가운데 버튼: 재생/일시정지\n'회전'을 누르면 가로 전체화면",
 			          p->title, p->srch, p->vitag, p->aitag, (p->vs.downloaded + p->as.downloaded) / 1024);
 			text_u8(dc, line, &rc, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
@@ -768,7 +865,7 @@ static DWORD WINAPI audio_thread(LPVOID arg)
 	memset(hdr, 0, sizeof hdr);
 	memset(busy, 0, sizeof busy);
 	memset(&rs, 0, sizeof rs);
-	fc = open_fmt(&p->as);
+	fc = open_fmt(&p->as, p->media_post, &p->quit, p->adiag, sizeof p->adiag);
 	if (!fc) goto dead;
 	aidx = find_stream(fc, AVMEDIA_TYPE_AUDIO);
 	if (aidx < 0) goto dead;
@@ -779,7 +876,10 @@ static DWORD WINAPI audio_thread(LPVOID arg)
 	cc = avcodec_alloc_context3(dec);
 	if (!cc || avcodec_parameters_to_context(cc, fc->streams[aidx]->codecpar) < 0) goto dead;
 	cc->thread_count = 1;
-	if (avcodec_open2(cc, dec, NULL) < 0) goto dead;
+	EnterCriticalSection(&g_ffcs);
+	i = avcodec_open2(cc, dec, NULL);
+	LeaveCriticalSection(&g_ffcs);
+	if (i < 0) { strcpy(p->adiag, "음성 디코더를 열 수 없음"); goto dead; }
 	pkt = av_packet_alloc();
 	fr = av_frame_alloc();
 	mem = (short *)malloc(NBUF * BUFSAMP * 4);
@@ -979,11 +1079,18 @@ static DWORD WINAPI video_thread(LPVOID arg)
 	long drop_before = 0;
 	AVRational tb;
 	int keyskip = 0;
+	int r0;
 
-	fc = open_fmt(&p->vs);
-	if (!fc) {
-		set_error(p, p->vs.failed ? p->vs.err : "영상을 열 수 없습니다 (형식 오류 또는 네트워크 문제)");
-		return 0;
+	{
+		char diag[600], msg[700];
+		fc = open_fmt(&p->vs, p->media_post, &p->quit, diag, sizeof diag);
+		if (!fc) {
+			if (p->quit) return 0;
+			_snprintf(msg, sizeof msg, "영상을 열 수 없습니다. 이 화면을 사진으로 보내 주세요.\n%s", diag);
+			msg[sizeof msg - 1] = 0;
+			set_error(p, msg);
+			return 0;
+		}
 	}
 	vidx = find_stream(fc, AVMEDIA_TYPE_VIDEO);
 	if (vidx < 0) { set_error(p, "영상 트랙이 없습니다"); goto out; }
@@ -995,7 +1102,10 @@ static DWORD WINAPI video_thread(LPVOID arg)
 	cc->thread_count = 1;
 	cc->flags2 |= AV_CODEC_FLAG2_FAST;
 	if (!g_tune.loopfilter) cc->skip_loop_filter = AVDISCARD_ALL;
-	if (avcodec_open2(cc, dec, NULL) < 0) { set_error(p, "디코더를 열 수 없습니다"); goto out; }
+	EnterCriticalSection(&g_ffcs);
+	r0 = avcodec_open2(cc, dec, NULL);
+	LeaveCriticalSection(&g_ffcs);
+	if (r0 < 0) { set_error(p, "디코더를 열 수 없습니다"); goto out; }
 	if (fc->streams[vidx]->codecpar->width > 0) {
 		EnterCriticalSection(&p->cs);
 		if (p->srcw != fc->streams[vidx]->codecpar->width || p->srch != fc->streams[vidx]->codecpar->height) {
@@ -1130,6 +1240,7 @@ Player *player_open(HWND hwnd, const YtStreams *s, int orientation, int show_sta
 	LOGFONTW lf;
 	if (!p) return NULL;
 	init_tabs();
+	if (!g_ffcs_init) { InitializeCriticalSection(&g_ffcs); g_ffcs_init = 1; }
 	av_log_set_callback(log_cb);
 	av_force_cpu_flags(g_tune.asm_on ? -1 : 0);
 	InitializeCriticalSection(&p->cs);
@@ -1142,6 +1253,7 @@ Player *player_open(HWND hwnd, const YtStreams *s, int orientation, int show_sta
 	p->srcw = s->w > 0 ? s->w : 426;
 	p->srch = s->h > 0 ? s->h : 240;
 	p->ori = orientation;
+	p->media_post = s->media_post;
 	p->show_stats = show_stats;
 	p->state = PS_LOADING;
 	p->ovl = 1;
