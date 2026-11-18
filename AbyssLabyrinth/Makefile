@@ -12,7 +12,7 @@ pc: out/Abyss_PC.exe
 
 out/Abyss_WM61.exe: $(SRC) src/game.h
 	mkdir -p out
-	$(CE_CC) -std=gnu99 -O2 -mcpu=arm1136j-s -D_WIN32_WCE=0x502 -DUNDER_CE -DUNICODE -D_UNICODE \
+	$(CE_CC) -std=gnu99 -O2 -march=armv5te -mtune=xscale -D_WIN32_WCE=0x502 -DUNDER_CE -DUNICODE -D_UNICODE \
 	  -o $@ $(SRC) -laygshell -static-libgcc
 	arm-mingw32ce-strip $@ || true
 

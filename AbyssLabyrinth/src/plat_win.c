@@ -10,6 +10,7 @@
 #include <aygshell.h>
 #endif
 #include "game.h"
+#include <string.h>
 
 static HWND hwnd;
 static HDC memdc;
@@ -116,6 +117,24 @@ int plat_fread(void *f, void *buf, int n)
 }
 int plat_fseek(void *f, long off) { return SetFilePointer((HANDLE)f, off, NULL, FILE_BEGIN) != 0xFFFFFFFF; }
 void plat_fclose(void *f) { CloseHandle((HANDLE)f); }
+
+/* startup log next to the exe (helps diagnose devices where the app does not start) */
+static void plog(const char *msg)
+{
+    wchar_t p[MAX_PATH + 32], *s;
+    HANDLE h;
+    DWORD w;
+    GetModuleFileNameW(NULL, p, MAX_PATH);
+    s = wcsrchr(p, L'\\');
+    if (s) s[1] = 0; else p[0] = 0;
+    wcscat(p, L"abyss_log.txt");
+    h = CreateFileW(p, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    SetFilePointer(h, 0, NULL, FILE_END);
+    WriteFile(h, msg, (DWORD)strlen(msg), &w, NULL);
+    WriteFile(h, "\r\n", 2, &w, NULL);
+    CloseHandle(h);
+}
 
 static HFONT mkfont(int h, int bold)
 {
@@ -259,6 +278,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     int sw, sh;
     (void)hp; (void)cmd;
 
+    plog("--- start");
     hwnd = FindWindowW(CLS, NULL);
     if (hwnd) { SetForegroundWindow(hwnd); return 0; }
 
@@ -287,14 +307,20 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
                              CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, NULL, NULL, hi, NULL);
     }
 #endif
-    if (!hwnd) return 1;
+    if (!hwnd) { plog("CreateWindow failed"); return 1; }
+    plog("window ok");
     fSmall = mkfont(12, 0);
     fBig = mkfont(22, 1);
     create_dib();
+    plog(bits ? "dib ok" : "dib FAILED");
+    if (!bits) return 1;
     calc_dst();
     fullscreen();
+    plog("game_init...");
     game_init(logH, bits, GetTickCount());
+    plog("game_init ok");
     redraw();
+    plog("first frame ok");
     ShowWindow(hwnd, show);
     UpdateWindow(hwnd);
     SetTimer(hwnd, 1, 50, NULL);
