@@ -5,13 +5,14 @@
 WEB := ../M480Web
 BEARSSL_SRC := $(wildcard $(WEB)/third_party/bearssl/src/*/*.c)
 APP_SRC := src/main.c src/net.c src/url.c src/util.c src/json.c src/yt.c src/player.c src/img.c src/tubelog.c
+CE_SRC := src/ce_compat.c
 INC := -Isrc -I$(WEB)/third_party -I$(WEB)/third_party/bearssl/inc -I$(WEB)/third_party/bearssl/src
 BRDEFS := -DBR_USE_UNIX_TIME=0 -DBR_USE_WIN32_TIME=0 -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0
 
 CE_CC := /opt/cegcc/bin/arm-mingw32ce-gcc
 CE_WINDRES := /opt/cegcc/bin/arm-mingw32ce-windres
 CE_FF := ffmpeg-ce
-CE_CFLAGS := -O2 -mcpu=arm1136j-s -D_WIN32_WCE=0x0502 -DUNICODE -D_UNICODE $(INC) -I$(CE_FF)/include $(BRDEFS) -Wall -Wno-unused-function -Wno-pointer-sign -Wno-deprecated-declarations
+CE_CFLAGS := -O2 -march=armv5te -mtune=xscale -D_WIN32_WCE=0x0502 -Icompat -DUNICODE -D_UNICODE $(INC) -I$(CE_FF)/include $(BRDEFS) -Wall -Wno-unused-function -Wno-pointer-sign -Wno-deprecated-declarations
 CE_LDFLAGS := -static -Wl,--stack=0x40000 -Wl,--major-subsystem-version=5,--minor-subsystem-version=2 \
 	-L$(CE_FF)/lib -lavformat -lavcodec -lavutil -lws2 -laygshell
 
@@ -22,7 +23,7 @@ W_LDFLAGS := -static -mwindows -municode -L$(W_FF)/lib -lavformat -lavcodec -lav
 
 BR_CE_OBJ := $(patsubst $(WEB)/third_party/bearssl/src/%.c,build/ce/br/%.o,$(BEARSSL_SRC))
 BR_W_OBJ := $(patsubst $(WEB)/third_party/bearssl/src/%.c,build/win/br/%.o,$(BEARSSL_SRC))
-APP_CE_OBJ := $(patsubst src/%.c,build/ce/%.o,$(APP_SRC))
+APP_CE_OBJ := $(patsubst src/%.c,build/ce/%.o,$(APP_SRC) $(CE_SRC))
 APP_W_OBJ := $(patsubst src/%.c,build/win/%.o,$(APP_SRC))
 
 all: ce

@@ -716,7 +716,23 @@ static void present(Player *p)
 typedef struct {
 	int srate, pos;            /* pos: 16.16 phase */
 	short pl, pr;              /* previous sample */
+	int hxl, hxr, hyl, hyr;    /* high-pass filter state */
 } Resamp;
+
+/* The M480 earphone amp distorts with loud, bass-heavy material: cut below
+   ~90 Hz and play at 60 % level, like M480Music does. */
+#define HPA 31939   /* exp(-2*pi*90/22050) in Q15 */
+#define GAIN 19661  /* 0.6 in Q15 */
+static short shape(int x, int *hx, int *hy)
+{
+	int y = (int)(((long long)HPA * (*hy + x - *hx)) >> 15);
+	*hx = x;
+	*hy = y;
+	y = (y * GAIN) >> 15;
+	if (y > 32767) y = 32767;
+	if (y < -32768) y = -32768;
+	return (short)y;
+}
 
 static int find_stream(AVFormatContext *fc, enum AVMediaType t)
 {
@@ -803,7 +819,7 @@ static DWORD WINAPI audio_thread(LPVOID arg)
 			p->aeof_done = 0;
 			p->abase_ms = target;
 			drop_before = target;
-			rs.pos = 0; rs.pl = rs.pr = 0; rs.srate = 0;
+			memset(&rs, 0, sizeof rs);
 			if (target > 0 || p->seek_gen > 1) {
 				av_seek_frame(fc, aidx, av_rescale_q(target, (AVRational){1, 1000}, tb), AVSEEK_FLAG_BACKWARD);
 				fc->pb->error = 0;
@@ -902,8 +918,8 @@ static DWORD WINAPI audio_thread(LPVOID arg)
 				if (p->paused && busy[cur] && !(hdr[cur].dwFlags & WHDR_DONE)) { Sleep(30); continue; }
 				busy[cur] = 0;
 				o = (short *)hdr[cur].lpData + fill_n * 2;
-				o[0] = (short)lo;
-				o[1] = (short)ro;
+				o[0] = shape(lo, &rs.hxl, &rs.hyl);
+				o[1] = shape(ro, &rs.hxr, &rs.hyr);
 				if (++fill_n == BUFSAMP) {
 					hdr[cur].dwBufferLength = BUFSAMP * 4;
 					waveOutWrite(p->hwo, &hdr[cur], sizeof(WAVEHDR));

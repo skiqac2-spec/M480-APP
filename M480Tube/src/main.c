@@ -895,6 +895,23 @@ static void CALLBACK script_timer(HWND h, UINT m, UINT_PTR id, DWORD t)
 			else if (!strncmp(act, "tap=", 4) && g_player) { int x = atoi(act + 4), y = atoi(strchr(act, '/') + 1); player_tap(g_player, x, y); }
 			else if (!strcmp(act, "stat") && g_player) player_debug(g_player, "stat", 0);
 			else if (!strcmp(act, "quit")) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+			else if (!strncmp(act, "listshot=", 9) && g_bbits) {
+				FILE *f = fopen(act + 9, "wb");
+				BITMAPFILEHEADER fh;
+				struct { BITMAPINFOHEADER h; DWORD m[3]; } bi;
+				int yy;
+				if (f) {
+					memset(&fh, 0, sizeof fh); memset(&bi, 0, sizeof bi);
+					fh.bfType = 0x4D42; fh.bfOffBits = sizeof fh + sizeof bi;
+					bi.h.biSize = sizeof(BITMAPINFOHEADER); bi.h.biWidth = g_bbw; bi.h.biHeight = -g_bbh;
+					bi.h.biPlanes = 1; bi.h.biBitCount = 16; bi.h.biCompression = BI_BITFIELDS;
+					bi.m[0] = 0xF800; bi.m[1] = 0x07E0; bi.m[2] = 0x001F;
+					fwrite(&fh, sizeof fh, 1, f); fwrite(&bi, sizeof bi, 1, f);
+					for (yy = 0; yy < g_bbh; yy++) fwrite(g_bbits + yy * g_bbstride, 2, g_bbstride, f);
+					fclose(f);
+				}
+			}
+			else if (!strncmp(act, "scroll=", 7)) { g_scroll = atoi(act + 7); clamp_scroll(); list_invalidate(); }
 		}
 		s = next ? next + 1 : NULL;
 	}
@@ -907,6 +924,28 @@ static void test_hook(void)
 	char *f[5];
 	int n = 0;
 	char *p;
+	if (getenv("M480TUBE_LISTMOCK")) {
+		FILE *fp = fopen(getenv("M480TUBE_LISTMOCK"), "rb");
+		long len;
+		char *d;
+		SearchJob *sj = (SearchJob *)calloc(1, sizeof(SearchJob));
+		if (!fp) return;
+		fseek(fp, 0, SEEK_END); len = ftell(fp); fseek(fp, 0, SEEK_SET);
+		d = (char *)malloc(len + 1); fread(d, 1, len, fp); d[len] = 0; fclose(fp);
+		sj->ok = yt_parse_search(d, (int)len, &sj->res);
+		sj->gen = g_gen;
+		sj->query = xstrdup("test");
+		free(g_query); g_query = xstrdup("test");
+		g_searching = 1;
+		free(d);
+		on_searched(sj);
+		if (getenv("M480TUBE_SCRIPT")) {
+			g_script = xstrdup(getenv("M480TUBE_SCRIPT"));
+			g_script_t0 = GetTickCount();
+			SetTimer(NULL, 0, 100, script_timer);
+		}
+		return;
+	}
 	if (getenv("M480TUBE_PARSE") || getenv("M480TUBE_PARSEP")) {
 		const char *fn = getenv("M480TUBE_PARSE") ? getenv("M480TUBE_PARSE") : getenv("M480TUBE_PARSEP");
 		FILE *fp = fopen(fn, "rb");

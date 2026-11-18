@@ -50,13 +50,15 @@ jobs:
           export PATH=/opt/cegcc/bin:$PATH
           ./build_ffmpeg.sh ce
 
-      - name: Build M480Tube
+      - name: Build M480Tube + CAB
         run: |
+          sudo apt-get install -y gcab
           export PATH=/opt/cegcc/bin:$PATH
           make ce
           mkdir -p out
-          cp build/M480Tube.exe out/
-          ls -la out
+          cp build/M480Tube.exe README.txt _setup.xml out/
+          cd out && gcab -c -z M480Tube.cab _setup.xml M480Tube.exe README.txt && rm _setup.xml
+          ls -la
 
       - name: Upload
         uses: actions/upload-artifact@v4
