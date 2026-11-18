@@ -11,6 +11,7 @@
 #endif
 #include "game.h"
 #include <string.h>
+#include <mmsystem.h>
 
 static HWND hwnd;
 static HDC memdc;
@@ -136,6 +137,65 @@ static void plog(const char *msg)
     CloseHandle(h);
 }
 
+/* ---------------- audio: waveOut, 4 rotating buffers fed by a worker thread ---------------- */
+#define ABUF 4
+#define ALEN 1024
+static CRITICAL_SECTION acs;
+static HWAVEOUT hwo;
+static WAVEHDR whdr[ABUF];
+static short abuf[ABUF][ALEN];
+static HANDLE aevt, athr;
+static volatile int arun;
+void plat_audio_lock(void) { EnterCriticalSection(&acs); }
+void plat_audio_unlock(void) { LeaveCriticalSection(&acs); }
+static DWORD WINAPI audio_thread(LPVOID p)
+{
+    int i;
+    (void)p;
+    for (i = 0; i < ABUF; i++) {
+        audio_mix(abuf[i], ALEN);
+        whdr[i].lpData = (LPSTR)abuf[i]; whdr[i].dwBufferLength = ALEN * 2; whdr[i].dwFlags = 0;
+        waveOutPrepareHeader(hwo, &whdr[i], sizeof(WAVEHDR));
+        waveOutWrite(hwo, &whdr[i], sizeof(WAVEHDR));
+    }
+    while (arun) {
+        WaitForSingleObject(aevt, 200);
+        for (i = 0; i < ABUF && arun; i++) if (whdr[i].dwFlags & WHDR_DONE) {
+            audio_mix(abuf[i], ALEN);
+            whdr[i].dwFlags &= ~WHDR_DONE;
+            waveOutWrite(hwo, &whdr[i], sizeof(WAVEHDR));
+        }
+    }
+    return 0;
+}
+static void audio_start(void)
+{
+    WAVEFORMATEX wf;
+    DWORD tid;
+    InitializeCriticalSection(&acs);
+    audio_init();
+    memset(&wf, 0, sizeof(wf));
+    wf.wFormatTag = WAVE_FORMAT_PCM; wf.nChannels = 1; wf.nSamplesPerSec = snd_rate;
+    wf.wBitsPerSample = 16; wf.nBlockAlign = 2; wf.nAvgBytesPerSec = snd_rate * 2;
+    aevt = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (waveOutOpen(&hwo, WAVE_MAPPER, &wf, (DWORD)aevt, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR) { hwo = 0; plog("waveOut FAILED"); return; }
+    arun = 1;
+    athr = CreateThread(NULL, 0, audio_thread, NULL, 0, &tid);
+    if (athr) SetThreadPriority(athr, THREAD_PRIORITY_ABOVE_NORMAL);
+    plog("audio ok");
+}
+static void audio_stop(void)
+{
+    int i;
+    if (!hwo) return;
+    arun = 0; SetEvent(aevt);
+    if (athr) { WaitForSingleObject(athr, 1000); CloseHandle(athr); }
+    waveOutReset(hwo);
+    for (i = 0; i < ABUF; i++) waveOutUnprepareHeader(hwo, &whdr[i], sizeof(WAVEHDR));
+    waveOutClose(hwo); hwo = 0;
+}
+static void audio_pause(int p) { if (hwo) { if (p) waveOutPause(hwo); else waveOutRestart(hwo); } }
+
 static HFONT mkfont(int h, int bold)
 {
     LOGFONTW lf;
@@ -217,7 +277,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         return 0;
     case WM_ACTIVATE:
-        if (LOWORD(wp) != WA_INACTIVE) fullscreen();
+        if (LOWORD(wp) != WA_INACTIVE) { fullscreen(); audio_pause(0); } else audio_pause(1);
         break;
     case WM_SIZE:
         calc_dst();
@@ -261,6 +321,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_DESTROY:
         KillTimer(h, 1);
+        audio_stop();
         PostQuitMessage(0);
         return 0;
     }
@@ -319,6 +380,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     plog("game_init...");
     game_init(logH, bits, GetTickCount());
     plog("game_init ok");
+    audio_start();
     redraw();
     plog("first frame ok");
     ShowWindow(hwnd, show);

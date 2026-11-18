@@ -124,22 +124,22 @@ add('boss_warden', golem, dict(H=130, seed=19, skin='stone', sp={'col': C(72, 52
 
 # ---- the player character, seen from behind (32 frames: + 8 casting frames)
 import math as _m
-add('hero', biped, dict(H=100, skin='skin', sp={'col': C(176, 140, 116), 'bloody': False}, armor=True,
+add('hero', biped, dict(H=100, skin='skin', sp={'col': C(176, 140, 116), 'bloody': False, 'cracks': False}, armor=True,
                         armorp={'col': C(120, 116, 112), 'rust': 0.75, 'bloody': False}, weapon='sword', shield=True,
                         shp={'col': C(110, 80, 50)}, shmat='wood', cape={'col': C(110, 20, 18), 'bloody': False},
                         hair={'col': C(70, 50, 34), 'bloody': False}, legmat='robe', legp={'col': C(70, 56, 44), 'bloody': False},
                         bootmat='skin', bootp={'col': C(60, 40, 26), 'bloody': False}, armmat='robe', armp={'col': C(80, 64, 50), 'bloody': False},
                         bracer='metal', bracerp={'col': C(120, 116, 112), 'rust': 0.8, 'bloody': False}, loin='rag', loinp={'col': C(90, 70, 50)}, build=1.05, hunch=0.05, eyec=C(40, 30, 30)),
     (120, 112, 60, 108), _m.pi - 0.28)
-add('ally_priest', biped, dict(H=94, skin='skin', sp={'col': C(196, 160, 136), 'bloody': False}, robe=True,
+add('ally_priest', biped, dict(H=94, skin='skin', sp={'col': C(196, 160, 136), 'bloody': False, 'cracks': False}, robe=True,
                                robep={'col': C(190, 182, 160), 'bloody': False}, weapon='staff', hair={'col': C(200, 170, 90), 'bloody': False},
                                armmat='robe', armp={'col': C(190, 182, 160), 'bloody': False}, legmat='robe', legp={'col': C(160, 150, 130), 'bloody': False},
                                eyec=C(80, 160, 255), hunch=0.0), (120, 112, 60, 108), _m.pi - 0.28)
-add('ally_rogue', biped, dict(H=94, skin='skin', sp={'col': C(170, 132, 104), 'bloody': False}, hood=True,
+add('ally_rogue', biped, dict(H=94, skin='skin', sp={'col': C(170, 132, 104), 'bloody': False, 'cracks': False}, hood=True,
                               robep={'col': C(40, 60, 40), 'bloody': False}, cape={'col': C(40, 62, 40), 'bloody': False},
                               weapon='dagger', armmat='robe', armp={'col': C(60, 50, 40), 'bloody': False},
                               legmat='robe', legp={'col': C(50, 44, 36), 'bloody': False}, eyec=C(255, 220, 120)), (120, 112, 60, 108), _m.pi - 0.28)
-add('ally_barb', biped, dict(H=102, skin='skin', sp={'col': C(186, 140, 110), 'bloody': False}, build=1.25, pecs=True,
+add('ally_barb', biped, dict(H=102, skin='skin', sp={'col': C(186, 140, 110), 'bloody': False, 'cracks': False}, build=1.25, pecs=True,
                              weapon='axe', hair={'col': C(150, 90, 40), 'bloody': False}, legmat='fur', legp={'col': C(110, 86, 60), 'bloody': False},
                              loin='fur', loinp={'col': C(110, 86, 60)}, bracer='metal', bracerp={'col': C(110, 104, 96), 'bloody': False},
                              eyec=C(60, 40, 30)), (124, 116, 62, 112), _m.pi - 0.28)

@@ -1,8 +1,12 @@
 심연의 미궁 (Abyss Labyrinth) - SCH-M480 / Windows Mobile 6.1용 던전 RPG
 
 [설치 (휴대폰)]
-  Abyss_WM61.exe 와 abyss_mon.dat(몬스터 그래픽, 약 11MB)를 SD카드의 같은 폴더에 복사 -> 파일 탐색기에서 실행
-  (abyss_mon.dat 가 없으면 단순한 도트 몬스터로 대체됩니다)
+  아래 4개 파일을 SD카드의 같은 폴더에 복사 -> 파일 탐색기에서 Abyss_WM61.exe 실행
+    Abyss_WM61.exe   게임
+    abyss_mon.dat    몬스터·동료 그래픽 (고해상도)
+    abyss_hero.dat   주인공 장비별 그래픽 (갑옷·투구·무기·방패가 바뀌면 모습도 바뀜)
+    abyss_snd.dat    음악·효과음
+  (dat 파일이 없으면 그 부분만 빠진 채로 실행됩니다: 도트 몬스터 / 무음)
   저장 파일(abyss.sav)은 exe와 같은 폴더에 자동 생성됩니다.
 
 [조작]  터치와 방향키 모두 지원
@@ -21,6 +25,15 @@
   - 길잡이석: 가 본 지역·다른 막의 야영지로 이동 (각 지역 첫 층에도 있음)
   - 귀환 두루마리: 던전에서 사용하면 마을로 이동, 마을의 붉은 차원문으로 원래 층에 복귀
 
+[소리]
+  메뉴(왼쪽 소프트키) -> 음악 / 효과음 켜기·끄기
+  지역마다 다른 배경음 (야영지, 막별 던전), 전투·보스전·승리·사망 음악, 공격·마법·발걸음 등 효과음
+
+[장비 모습]
+  무기 12종, 갑옷 10종, 투구 8종이 전투 화면의 주인공 모습에 그대로 반영됩니다.
+  한손 무기 + 가죽 갑옷 이상이면 방패(원형/카이트/타워)를 자동으로 듭니다.
+  능력치 화면(캐릭터)에서도 지금 장비한 모습을 볼 수 있습니다.
+
 [게임 규칙]
   - 층마다 던전이 무작위로 새로 만들어지는 로그라이크
   - 죽으면 저장이 지워짐(영구 사망). 계단을 내려갈 때 자동 저장
@@ -28,5 +41,7 @@
   - 아이템 등급색: 흰색(일반) 파랑(마법) 노랑(희귀) 금색(고유)
   - 성소, 샘, 보물상자, 떠돌이 상인이 무작위로 등장
 
-[몬스터 그래픽 다시 만들기]
-  python3 art/build_art.py data/abyss_mon.dat preview_폴더   (numpy, pillow 필요)
+[그래픽·소리 다시 만들기]  (numpy, scipy, pillow 필요)
+  python3 art/build_art.py data/abyss_mon.dat preview_폴더
+  python3 art/build_hero.py data/abyss_hero.dat preview.png
+  python3 art/sound.py data/abyss_snd.dat

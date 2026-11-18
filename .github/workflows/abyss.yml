@@ -42,7 +42,7 @@ jobs:
           sudo apt-get install -y mingw-w64
           export PATH=/opt/cegcc/bin:$PATH
           make all
-          cp data/abyss_mon.dat README.txt out/
+          cp data/*.dat README.txt out/
 
       - name: Upload
         uses: actions/upload-artifact@v4

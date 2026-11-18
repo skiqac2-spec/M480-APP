@@ -31,6 +31,9 @@ static void wfmt(wchar_t *b, int n, const wchar_t *f, ...)
 /*  colour / pixel helpers                                          */
 /* ================================================================ */
 static int clampi(int v, int a, int b) { return v < a ? a : (v > b ? b : v); }
+enum { SX_CLICK, SX_STEP, SX_BUMP, SX_SWING, SX_HIT, SX_CRIT, SX_MISS, SX_GROWL, SX_HURT, SX_MDIE, SX_FIRE, SX_EXPL, SX_BOLT,
+       SX_FROST, SX_HEAL, SX_DRINK, SX_COINS, SX_CHEST, SX_PICKUP, SX_LVUP, SX_PORTAL, SX_SHRINE, SX_TRADE, SX_ENC, SX_DEATH };
+enum { MU_TITLE, MU_TOWN, MU_ACT1, MU_BATTLE = 7, MU_BOSS, MU_WIN, MU_DIE };
 static u16 rgb(int r, int g, int b)
 {
     r = clampi(r, 0, 255); g = clampi(g, 0, 255); b = clampi(b, 0, 255);
@@ -386,6 +389,7 @@ typedef struct {
 } SaveData;
 static SaveData S;
 static void camp_arrival(void);
+static int hero_dirty = 1;        /* equipment changed: rebuild the hero's battle sprite */
 #define SAVE_MAGIC 0x41425953
 #define SAVE_VER 4
 
@@ -1670,9 +1674,9 @@ static void build_sprite(Mon *m)
 /* ---- monster animation: 24 frames (idle 8, attack 8, hurt 4, death 4) ---- */
 #define NFR 24
 enum { MT_HUM, MT_WING, MT_DEMON, MT_LEGS, MT_FLOAT, MT_HEAVY, MT_BLOB, MT_BEAST, MT_WORM };
-static u16 *FCOL[7];
-static unsigned char *FALP[7];
-static int FCAP[7];
+static u16 *FCOL[8];
+static unsigned char *FALP[8];
+static int FCAP[8];   /* 0-2 monsters, 3-6 party, 7 hero portrait */
 static int BTOP, BBOT;
 static int sclipT = 0, sclipB = 9999;
 static void gs_layout(void) { BTOP = 0; BBOT = GH - 120; }
@@ -1888,9 +1892,11 @@ static void draw_sprite(const Mon *m)
     }
 }
 
-/* ---- pre-rendered monster art from abyss_mon.dat ---- */
+/* ---- pre-rendered monster art from abyss_mon.dat ----
+   v2 art is stored at 2x resolution; at load time every frame is area-filtered
+   down (or up) to exactly the size it will be shown at, so it stays crisp.      */
 static void *mdat;
-static int mcount;
+static int mcount, mver;
 static unsigned moff[80];
 static unsigned char *mscratch;
 static int mscap;
@@ -1900,6 +1906,7 @@ static void mdat_open(void)
     mdat = plat_fopen(L"abyss_mon.dat");
     if (!mdat) return;
     if (plat_fread(mdat, h, 8) != 8 || memcmp(h, "AMON", 4)) { plat_fclose(mdat); mdat = 0; return; }
+    mver = h[4] | (h[5] << 8);
     mcount = h[6] | (h[7] << 8);
     if (mcount > 80) mcount = 80;
     {
@@ -1909,43 +1916,275 @@ static void mdat_open(void)
         for (i = 0; i < mcount; i++) moff[i] = t[i * 4] | (t[i * 4 + 1] << 8) | (t[i * 4 + 2] << 16) | ((unsigned)t[i * 4 + 3] << 24);
     }
 }
-static int load_art_n(Mon *m, int maxnf)
+
+/* premultiplied source frame (decode / composite target) */
+static u16 *SPR, *SPG, *SPB, *SZ;
+static unsigned char *SA;
+static int scap;
+static int src_alloc(int n)
 {
-    unsigned char h[10];
-    int W, Hh, nf, f, y;
-    if (!mdat || m->art < 0 || m->art >= mcount) return 0;
-    plat_fseek(mdat, (long)moff[m->art]);
-    if (plat_fread(mdat, h, 10) != 10) return 0;
-    W = h[0] | h[1] << 8; Hh = h[2] | h[3] << 8; nf = h[8] | h[9] << 8;
-    if (nf > maxnf) nf = maxnf;
-    m->nfr = nf;
-    if (!frame_alloc_n(m->slot, W, Hh, nf)) return 0;
-    m->fw = W; m->fh = Hh; m->fax = h[4] | h[5] << 8; m->fay = h[6] | h[7] << 8;
-    for (f = 0; f < nf; f++) {
-        unsigned char sz[4], *p;
-        unsigned n;
-        u16 *dc = FCOL[m->slot] + f * W * Hh;
-        unsigned char *da = FALP[m->slot] + f * W * Hh;
-        if (plat_fread(mdat, sz, 4) != 4) return 0;
-        n = sz[0] | sz[1] << 8 | sz[2] << 16 | (unsigned)sz[3] << 24;
-        if ((int)n > mscap) { free(mscratch); mscratch = (unsigned char *)malloc(n); mscap = mscratch ? (int)n : 0; if (!mscratch) return 0; }
-        if (plat_fread(mdat, mscratch, (int)n) != (int)n) return 0;
-        p = mscratch;
-        for (y = 0; y < Hh; y++) {
-            int ns = *p++, s;
-            for (s = 0; s < ns; s++) {
-                int x0 = p[0], len = p[1], k;
-                p += 2;
-                for (k = 0; k < len; k++) dc[y * W + x0 + k] = (u16)(p[k * 2] | p[k * 2 + 1] << 8);
-                p += len * 2;
-                for (k = 0; k < len; k++) { int a = p[k]; da[y * W + x0 + k] = (unsigned char)(a < 2 ? 2 : a); }
-                p += len;
+    if (n > scap) {
+        free(SPR); free(SPG); free(SPB); free(SZ); free(SA);
+        SPR = (u16 *)malloc(n * 2); SPG = (u16 *)malloc(n * 2); SPB = (u16 *)malloc(n * 2); SZ = (u16 *)malloc(n * 2);
+        SA = (unsigned char *)malloc(n);
+        scap = (SPR && SPG && SPB && SZ && SA) ? n : 0;
+        if (!scap) return 0;
+    }
+    memset(SA, 0, n);
+    return 1;
+}
+static int read_block(void *f, unsigned n)
+{
+    if ((int)n > mscap) { free(mscratch); mscratch = (unsigned char *)malloc(n); mscap = mscratch ? (int)n : 0; if (!mscratch) return 0; }
+    return plat_fread(f, mscratch, (int)n) == (int)n;
+}
+/* RLE rows -> premultiplied source buffers. wide = u16 x, depth = per-pixel u16 depth (hero layers).
+   With depth the layer is merged into what is already there (front/back by depth). */
+static void decode_rle(const unsigned char *p, int W, int Hh, int wide, int depth)
+{
+    int y;
+    for (y = 0; y < Hh; y++) {
+        int ns = *p++, sg;
+        for (sg = 0; sg < ns; sg++) {
+            int x0, len, k;
+            const unsigned char *pc, *pa, *pz;
+            if (wide) { x0 = p[0] | p[1] << 8; len = p[2]; p += 3; } else { x0 = p[0]; len = p[1]; p += 2; }
+            pc = p; pa = p + len * 2; pz = pa + len;
+            p = pa + len + (depth ? len * 2 : 0);
+            for (k = 0; k < len; k++) {
+                int o = y * W + x0 + k, c = pc[k * 2] | pc[k * 2 + 1] << 8, a = pa[k];
+                int r = (c >> 11) * a, g = ((c >> 5) & 63) * a, b = (c & 31) * a;
+                if (!depth || !SA[o] || (a == 255 && pz[k * 2] + (pz[k * 2 + 1] << 8) <= SZ[o])) {
+                    SPR[o] = (u16)r; SPG[o] = (u16)g; SPB[o] = (u16)b; SA[o] = (unsigned char)a;
+                    if (depth) SZ[o] = (u16)(pz[k * 2] | pz[k * 2 + 1] << 8);
+                } else {
+                    int z = pz[k * 2] | pz[k * 2 + 1] << 8, A = SA[o];
+                    if (z <= SZ[o]) {            /* new fragment in front */
+                        int ia = 255 - a;
+                        SPR[o] = (u16)(r + SPR[o] * ia / 255); SPG[o] = (u16)(g + SPG[o] * ia / 255); SPB[o] = (u16)(b + SPB[o] * ia / 255);
+                        SA[o] = (unsigned char)(a + A * ia / 255); SZ[o] = (u16)z;
+                    } else {                     /* behind: only shows through what is not covered yet */
+                        int ia = 255 - A;
+                        SPR[o] = (u16)(SPR[o] + r * ia / 255); SPG[o] = (u16)(SPG[o] + g * ia / 255); SPB[o] = (u16)(SPB[o] + b * ia / 255);
+                        SA[o] = (unsigned char)(A + a * ia / 255);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* separable area filter: premultiplied source (SW x SH) -> 565 colour + alpha (DW x DH) */
+static int *RT; static int rtcap;
+static short *WX0, *WXN; static unsigned short *WXW; static int wxcap;
+static int make_weights(int sn, int dn, short *j0, short *cnt, unsigned short *w, int maxk)
+{
+    int i, s = (int)(((long long)sn << 16) / dn);
+    for (i = 0; i < dn; i++) {
+        int a = (int)(((long long)i * sn << 16) / dn), b = a + s, j = a >> 16, k = 0, tot = 0;
+        j0[i] = (short)j;
+        while (j < sn && (j << 16) < b && k < maxk) {
+            int lo = a > (j << 16) ? a : (j << 16), hi = b < ((j + 1) << 16) ? b : ((j + 1) << 16);
+            int ww = (int)(((long long)(hi - lo) << 12) / s);
+            w[i * maxk + k] = (unsigned short)ww; tot += ww; k++; j++;
+        }
+        if (k && tot != 4096) w[i * maxk + k - 1] = (unsigned short)(w[i * maxk + k - 1] + 4096 - tot);
+        cnt[i] = (short)k;
+    }
+    return 1;
+}
+static int resample(int SW, int SH, int DW, int DH, u16 *dc, unsigned char *da)
+{
+    int x, y, kx = SW / DW + 2, ky = SH / DH + 2, n = DW * SH * 4, mx = DW > DH ? DW : DH, mk = kx > ky ? kx : ky;
+    short *Y0, *YN; unsigned short *YW;
+    if (n > rtcap) { free(RT); RT = (int *)malloc(n * sizeof(int)); rtcap = RT ? n : 0; if (!RT) return 0; }
+    if (DW > 1024 || DH > 1024) return 0;
+    mx = 1024;
+    if (!WX0) { WX0 = (short *)malloc(2048 * sizeof(short)); WXN = (short *)malloc(2048 * sizeof(short)); if (!WX0 || !WXN) return 0; }
+    if (mx * mk * 2 > wxcap) {
+        free(WXW);
+        WXW = (unsigned short *)malloc(mx * mk * 2 * sizeof(short));
+        wxcap = WXW ? mx * mk * 2 : 0;
+        if (!wxcap) return 0;
+    }
+    make_weights(SW, DW, WX0, WXN, WXW, kx);
+    Y0 = WX0 + mx; YN = WXN + mx; YW = WXW + mx * mk;
+    make_weights(SH, DH, Y0, YN, YW, ky);
+    for (y = 0; y < SH; y++) {
+        int *o = RT + y * DW * 4;
+        for (x = 0; x < DW; x++, o += 4) {
+            int j = WX0[x], k, A = 0, R = 0, G = 0, Bb = 0;
+            for (k = 0; k < WXN[x]; k++, j++) {
+                int si = y * SW + j, w = WXW[x * kx + k], a = SA[si];
+                if (!a) continue;
+                A += a * w; R += SPR[si] * w; G += SPG[si] * w; Bb += SPB[si] * w;
+            }
+            o[0] = A >> 8; o[1] = R >> 8; o[2] = G >> 8; o[3] = Bb >> 8;
+        }
+    }
+    for (y = 0; y < DH; y++) for (x = 0; x < DW; x++) {
+        int j = Y0[y], k, A = 0, R = 0, G = 0, Bb = 0, di = y * DW + x;
+        for (k = 0; k < YN[y]; k++, j++) {
+            const int *o = RT + (j * DW + x) * 4;
+            int w = YW[y * ky + k];
+            if (!o[0]) continue;
+            A += o[0] * w; R += o[1] * w; G += o[2] * w; Bb += o[3] * w;
+        }
+        {
+            int a = A >> 16;
+            if (a < 4) { da[di] = 0; continue; }
+            {
+                /* R,G,B were premultiplied by the same alpha factor A carries: one reciprocal per pixel */
+                int a12 = A >> 12, inv, rr_, gg, bb;
+                if (a12 < 1) a12 = 1;
+                inv = (1 << 24) / a12;
+                rr_ = (int)(((long long)(R >> 12) * inv) >> 24); gg = (int)(((long long)(G >> 12) * inv) >> 24); bb = (int)(((long long)(Bb >> 12) * inv) >> 24);
+                if (rr_ > 31) rr_ = 31; if (gg > 63) gg = 63; if (bb > 31) bb = 31;
+                dc[di] = (u16)(rr_ << 11 | gg << 5 | bb);
+                da[di] = (unsigned char)(a > 255 ? 255 : a < 2 ? 2 : a);
             }
         }
     }
     return 1;
 }
-static int load_art(Mon *m) { return load_art_n(m, NFR); }
+
+/* load art #art into frame slot `slot`, scaled so that one logical pixel = zoom/256 screen pixels */
+static int load_art_z(int art, int slot, int maxnf, int zoom, int *ow, int *oh, int *oax, int *oay, int *onf)
+{
+    unsigned char h[12];
+    int W, Hh, nf, f, sc, DW, DH, wide = mver >= 2;
+    if (!mdat || art < 0 || art >= mcount) return 0;
+    plat_fseek(mdat, (long)moff[art]);
+    if (plat_fread(mdat, h, wide ? 12 : 10) != (wide ? 12 : 10)) return 0;
+    W = h[0] | h[1] << 8; Hh = h[2] | h[3] << 8; nf = h[8] | h[9] << 8;
+    sc = wide ? (h[10] | h[11] << 8) : 256;
+    if (sc < 64) sc = 256;
+    if (nf > maxnf) nf = maxnf;
+    DW = W * zoom / sc; DH = Hh * zoom / sc;
+    if (DW < 4) DW = 4; if (DH < 4) DH = 4;
+    if (!frame_alloc_n(slot, DW, DH, nf)) return 0;
+    if (!src_alloc(W * Hh)) return 0;
+    *ow = DW; *oh = DH; *onf = nf;
+    *oax = (h[4] | h[5] << 8) * zoom / sc; *oay = (h[6] | h[7] << 8) * zoom / sc;
+    for (f = 0; f < nf; f++) {
+        unsigned char sz[4];
+        unsigned n;
+        if (plat_fread(mdat, sz, 4) != 4) return 0;
+        n = sz[0] | sz[1] << 8 | sz[2] << 16 | (unsigned)sz[3] << 24;
+        if (!read_block(mdat, n)) return 0;
+        if (f) memset(SA, 0, W * Hh);
+        decode_rle(mscratch, W, Hh, wide, 0);
+        if (!resample(W, Hh, DW, DH, FCOL[slot] + f * DW * DH, FALP[slot] + f * DW * DH)) return 0;
+    }
+    return 1;
+}
+/* monster art at its display zoom; afterwards the sprite is drawn at 1:1 (m->zoom = 256) */
+static int load_art_mon(Mon *m, int zoom)
+{
+    if (!load_art_z(m->art, m->slot, NFR, zoom, &m->fw, &m->fh, &m->fax, &m->fay, &m->nfr)) return 0;
+    m->zoom = 256;
+    return 1;
+}
+/* logical (on-screen at zoom 256) size of an art entry, without loading it */
+static int art_size(int art, int *w, int *h)
+{
+    unsigned char hd[12];
+    int wide = mver >= 2, sc;
+    if (!mdat || art < 0 || art >= mcount) return 0;
+    plat_fseek(mdat, (long)moff[art]);
+    if (plat_fread(mdat, hd, wide ? 12 : 10) != (wide ? 12 : 10)) return 0;
+    sc = wide ? (hd[10] | hd[11] << 8) : 256;
+    if (sc < 64) sc = 256;
+    *w = (hd[0] | hd[1] << 8) * 256 / sc; *h = (hd[2] | hd[3] << 8) * 256 / sc;
+    return 1;
+}
+
+/* ---- the wanderer: equipment layers from abyss_hero.dat ---- */
+static void *hdat;
+static int hW, hH, hAX, hAY, hNF, hSC, hN, hgrp[8];
+static unsigned hoff[64];
+static void hdat_open(void)
+{
+    unsigned char h[20], g[9];
+    int i, ng;
+    hdat = plat_fopen(L"abyss_hero.dat");
+    if (!hdat) return;
+    if (plat_fread(hdat, h, 20) != 20 || memcmp(h, "AHRO", 4)) { plat_fclose(hdat); hdat = 0; return; }
+    hN = h[6] | h[7] << 8; hW = h[8] | h[9] << 8; hH = h[10] | h[11] << 8; hAX = h[12] | h[13] << 8; hAY = h[14] | h[15] << 8;
+    hNF = h[16] | h[17] << 8; hSC = h[18] | h[19] << 8;
+    if (hN > 64) hN = 64;
+    plat_fread(hdat, g, 1); ng = g[0] > 8 ? 8 : g[0];
+    plat_fread(hdat, g + 1, ng);
+    for (i = 0; i < ng; i++) hgrp[i] = g[1 + i];
+    {
+        unsigned char t[256];
+        plat_fread(hdat, t, hN * 4);
+        for (i = 0; i < hN; i++) hoff[i] = t[i * 4] | (t[i * 4 + 1] << 8) | (t[i * 4 + 2] << 16) | ((unsigned)t[i * 4 + 3] << 24);
+    }
+}
+enum { HG_BODY, HG_HAIR, HG_ARMOR, HG_HELM, HG_WEAPON, HG_SHIELD };
+static int hero_layer(int grp, int v)
+{
+    int i, o = 0;
+    if (v < 0 || v >= hgrp[grp]) return -1;
+    for (i = 0; i < grp; i++) o += hgrp[i];
+    return o + v;
+}
+/* item base -> look variant (order = art/hero.py lists) */
+static int hero_look(int slot)
+{
+    static const signed char WV[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+    const Item *it = &S.eq[slot];
+    int b = it->base;
+    if (!it->kind) return -1;
+    if (slot == 0) { if (b <= 7) return WV[b]; if (b >= 23 && b <= 26) return 8 + b - 23; return 2; }
+    if (slot == 2) { if (b >= 8 && b <= 13) return b - 8; if (b >= 27 && b <= 30) return 6 + b - 27; return 3; }
+    if (slot == 1) { if (b >= 14 && b <= 18) return b - 14; if (b >= 31 && b <= 33) return 5 + b - 31; return 1; }
+    return -1;
+}
+static int hero_keys[8] = { -1, -1, -1, -1, -1, -1, -1, -1 }, hero_dirty_mask;
+static int hero_build(int slot, int zoom, int *ow, int *oh, int *oax, int *oay, int *onf)
+{
+    int lay[8], nl = 0, f, k, w = hero_look(0), a = hero_look(2), hm = hero_look(1), sh = -1, key;
+    int DW, DH;
+    if (!hdat) return 0;
+    if (hero_dirty) { hero_dirty = 0; hero_dirty_mask = 0xFF; }
+    if (w >= 0 && (w <= 3 || w == 6 || w == 9 || w == 11) && a >= 1) sh = a <= 2 ? 0 : a <= 4 ? 1 : 2;
+    key = ((((w + 1) * 16 + a + 1) * 16 + hm + 1) * 4 + sh + 1) * 1024 + zoom;
+    DW = hW * zoom / hSC; DH = hH * zoom / hSC;
+    *ow = DW; *oh = DH; *oax = hAX * zoom / hSC; *oay = hAY * zoom / hSC; *onf = hNF;
+    if (key == hero_keys[slot] && !(hero_dirty_mask & (1 << slot)) && FCAP[slot] >= DW * DH * hNF) return 1;
+    lay[nl++] = hero_layer(HG_BODY, 0);
+    if (hm < 0 || hm == 4 || hm == 7) lay[nl++] = hero_layer(HG_HAIR, 0);
+    if (a >= 0) lay[nl++] = hero_layer(HG_ARMOR, a);
+    if (hm >= 0) lay[nl++] = hero_layer(HG_HELM, hm);
+    if (w >= 0) lay[nl++] = hero_layer(HG_WEAPON, w);
+    if (sh >= 0) lay[nl++] = hero_layer(HG_SHIELD, sh);
+    hero_keys[slot] = -1;
+    if (!frame_alloc_n(slot, DW, DH, hNF) || !src_alloc(hW * hH)) return 0;
+    {
+        /* each layer's frames are consecutive: remember where the next frame of every layer starts */
+        unsigned pos[8];
+        for (k = 0; k < nl; k++) pos[k] = lay[k] >= 0 ? hoff[lay[k]] : 0;
+        for (f = 0; f < hNF; f++) {
+            memset(SA, 0, hW * hH);
+            for (k = 0; k < nl; k++) {
+                unsigned char sz[4];
+                unsigned n;
+                if (lay[k] < 0) continue;
+                plat_fseek(hdat, (long)pos[k]);
+                if (plat_fread(hdat, sz, 4) != 4) return 0;
+                n = sz[0] | sz[1] << 8 | sz[2] << 16 | (unsigned)sz[3] << 24;
+                if (!read_block(hdat, n)) return 0;
+                pos[k] += 4 + n;
+                decode_rle(mscratch, hW, hH, 1, 1);
+            }
+            if (!resample(hW, hH, DW, DH, FCOL[slot] + f * DW * DH, FALP[slot] + f * DW * DH)) return 0;
+        }
+    }
+    hero_keys[slot] = key; hero_dirty_mask &= ~(1 << slot);
+    return 1;
+}
 
 static void mon_init(Mon *m, const MonDef *d, int champ, int boss)
 {
@@ -1998,24 +2237,26 @@ static void layout_mons(void)
     gs_layout();
     ground = BTOP + (BBOT - 42 - BTOP) * 64 / 100 + 6;
     availh = ground - BTOP - 24;
-    int useart = 1;
+    int useart = 1, lw[3], lh[3];
     for (i = 0; i < B.n; i++) {
         Mon *m = &B.m[i];
         m->slot = i; m->appear = 14; m->fw = 0;
-        if (!load_art(m)) useart = 0;
+        if (!art_size(m->art, &lw[i], &lh[i])) useart = 0;
     }
     if (useart) {
-        for (i = 0; i < B.n; i++) { totw += B.m[i].fw * 3 / 4; if (B.m[i].fh > maxh) maxh = B.m[i].fh; }
+        for (i = 0; i < B.n; i++) { totw += lw[i] * 3 / 4; if (lh[i] > maxh) maxh = lh[i]; }
         zoom = B.n == 1 ? 300 : 256;
         if (maxh * zoom / 256 > availh) zoom = availh * 256 / maxh;
         if (totw * zoom / 256 > GW - 4) zoom = (GW - 4) * 256 / totw;
+        for (i = 0; i < B.n; i++) if (!load_art_mon(&B.m[i], zoom)) useart = 0;
+    }
+    if (useart) {
         for (i = 0; i < B.n; i++) {
             Mon *m = &B.m[i];
             int cx = GW * (i + 1) / (B.n + 1);
-            m->zoom = zoom;
-            m->sw = m->fw * zoom / 256; m->sh = m->fh * zoom / 256;
-            m->sx = cx - m->fax * zoom / 256;
-            m->sy = ground - m->fay * zoom / 256;
+            m->sw = m->fw; m->sh = m->fh;
+            m->sx = cx - m->fax;
+            m->sy = ground - m->fay;
         }
         return;
     }
@@ -2128,12 +2369,11 @@ static int pm_maxhp(int i) { return i == 0 ? p_maxhp() : B.pm[i].maxhp; }
 static int load_pm_art(int i)
 {
     PMember *p = &B.pm[i];
-    int slot = 3 + i;
-    Mon tmp;
-    memset(&tmp, 0, sizeof(tmp));
-    tmp.slot = slot; tmp.art = p->art;
-    if (!load_art_n(&tmp, 32)) return 0;
-    p->fw = tmp.fw; p->fh = tmp.fh; p->fax = tmp.fax; p->fay = tmp.fay; p->nf = tmp.nfr;
+    int z = p->zoom;
+    if (i == 0 && hero_build(3, z, &p->fw, &p->fh, &p->fax, &p->fay, &p->nf)) { p->zoom = 256; return 1; }
+    hero_keys[3 + i] = -1;              /* the slot is about to be overwritten */
+    if (!load_art_z(p->art, 3 + i, 32, z, &p->fw, &p->fh, &p->fax, &p->fay, &p->nf)) return 0;
+    p->zoom = 256;
     return 1;
 }
 
@@ -2585,6 +2825,7 @@ static void start_battle(int boss)
     B.phase = BP_INTRO;
     B.wait = 30;
     mode = M_BATTLE;
+    snd_play(SX_ENC);
     sel = 0;
     dirty = 1;
 }
@@ -2631,6 +2872,7 @@ static int first_alive(void) { int i; for (i = 0; i < B.n; i++) if (B.m[i].alive
 static void kill_mon(Mon *m)
 {
     m->alive = 0; m->dying = 10; S.kills++;
+    snd_play(SX_MDIE);
 }
 
 static void dmg_mon(int i, int d, int slot)
@@ -2663,8 +2905,9 @@ static void player_act(void)
         p_dmg(&lo, &hi);
         hit = clampi(80 + (p_dex() - m->agi) * 2, 50, 97);
         bline(0, C_WHITE, L"%ls의 공격!", P);
-        if (!chance(hit)) { bline(1, C_WHITE, L"그러나 %ls%ls 재빠르게 피했다!", m->name, JI(m->name)); return; }
+        if (!chance(hit)) { snd_play(SX_MISS); bline(1, C_WHITE, L"그러나 %ls%ls 재빠르게 피했다!", m->name, JI(m->name)); return; }
         crit = chance(5 + p_dex() / 8);
+        snd_play(crit ? SX_CRIT : SX_HIT);
         d = rr(lo, hi);
         if (crit) d *= 2;
         d -= m->def / 2;
@@ -2677,6 +2920,7 @@ static void player_act(void)
         const Skill *k = &SK[B.arg];
         int i, kills = 0;
         S.mp -= k->mp;
+        snd_play(B.arg == 0 ? SX_FIRE : B.arg == 1 ? SX_HEAL : B.arg == 2 ? SX_BOLT : SX_FROST);
         bline(0, C_BLUE, L"%ls%ls %ls%ls 외웠다!", P, JUN(P), k->n, JUL(k->n));
         if (B.arg == 0) {
             int t = B.tgt, d;
@@ -2705,6 +2949,7 @@ static void player_act(void)
         wchar_t buf[52], nm[40];
         item_name(&S.belt[B.arg], nm, 40);
         drink(&S.belt[B.arg], buf, 52);
+        snd_play(SX_DRINK);
         bline(0, C_WHITE, L"%ls%ls %ls%ls 마셨다.", P, JUN(P), nm, JUL(nm));
         bline(1, C_GREEN, L"%ls", buf);
     } else if (B.act == ACT_DEFEND) {
@@ -2727,6 +2972,7 @@ static void mon_act(int i)
     int d, hit, vic = 0;
     bclear();
     m->anim = 1; m->at = 0;
+    if (!m->frozen) snd_play_v(SX_GROWL, 200);
     if (B.np > 1 && chance(50)) {
         int k, c = 0, list[4];
         for (k = 1; k < B.np; k++) if (B.pm[k].hp > 0) list[c++] = k;
@@ -2740,6 +2986,7 @@ static void mon_act(int i)
         d = m->atk * rr(85, 115) / 100 - a->def / 2;
         if (d < 1) d = 1;
         a->hp -= d; a->anim = 2; a->at = 0; a->flash = 8;
+        snd_play(SX_HIT);
         if (a->hp <= 0) { a->hp = 0; a->anim = 3; a->at = 0; bline(1, C_RED, L"%ls%ls 쓰러졌다!", an, JI(an)); }
         else bline(1, C_RED, L"%ls%ls %d의 피해를 입었다!", an, JUN(an), d);
         B.shake = 6;
@@ -2759,6 +3006,7 @@ static void mon_act(int i)
     }
     if (m->spec == SPC_FIRE && chance(30)) {
         d = m->atk * 12 / 10 + rr(0, 3) - p_def() / 4;
+        snd_play(SX_FIRE);
         bline(0, C_WHITE, L"%ls%ls 화염을 내뿜었다!", m->name, JI(m->name));
     } else if (m->spec == SPC_BOSS && chance(25)) {
         d = m->atk * 17 / 10 - p_def() / 2;
@@ -2766,13 +3014,14 @@ static void mon_act(int i)
     } else {
         bline(0, C_WHITE, L"%ls의 공격!", m->name);
         hit = clampi(85 + m->agi - p_dex() / 2, 55, 95);
-        if (!chance(hit)) { bline(1, C_WHITE, L"%ls%ls 재빨리 몸을 피했다!", P, JUN(P)); return; }
+        if (!chance(hit)) { snd_play(SX_MISS); bline(1, C_WHITE, L"%ls%ls 재빨리 몸을 피했다!", P, JUN(P)); return; }
         d = m->atk * rr(85, 115) / 100 - p_def() / 2;
     }
     if (d < 1) d = 1;
     if (B.defend) { d /= 2; if (d < 1) d = 1; }
     S.hp -= d;
     if (S.hp < 0) S.hp = 0;
+    snd_play(SX_HIT); snd_play(S.hp > 0 ? SX_HURT : SX_DEATH);
     bline(1, C_RED, L"%ls%ls %d의 피해를 입었다!", P, JUN(P), d);
     B.shake = 8; B.redflash = 4;
     B.pm[0].anim = S.hp > 0 ? 2 : 3; B.pm[0].at = 0; B.pm[0].flash = 8;
@@ -2786,6 +3035,7 @@ static void level_check(void)
         S.lvl++;
         S.pts += 5;
         S.hp = p_maxhp(); S.mp = p_maxmp();
+        snd_play(SX_LVUP);
         bres(C_YEL, L"레벨이 올랐다! 레벨 %d", S.lvl);
         bres(C_YEL, L"능력치 포인트 5를 얻었다.");
         for (k = 0; k < 4; k++) if (SK[k].lvl == S.lvl) bres(C_BLUE, L"새 마법을 익혔다: %ls", SK[k].n);
@@ -2808,6 +3058,7 @@ static void victory(void)
     bres(C_WHITE, B.boss ? L"강적을 물리쳤다!" : L"괴물들을 물리쳤다!");
     bres(C_WHITE, L"경험치 %d, 금화 %d 획득", ex, gd);
     S.exp += ex; S.gold += gd;
+    snd_play(SX_COINS);
     for (i = 0; i < B.n; i++) {
         Mon *m = &B.m[i];
         int c = (m->boss || m->uniq) ? 100 : m->champ ? 60 : 18;
@@ -2878,7 +3129,7 @@ static void party_windup(int pi)
     }
     B.windup = 1;
     p->tgt = tgt; p->at = 0;
-    if (act == ACT_ATTACK) { p->anim = 1; B.wait = 7; }
+    if (act == ACT_ATTACK) { p->anim = 1; B.wait = 7; snd_play_v(SX_SWING, 180); }
     else if (act == ACT_DEFEND || act == ACT_FLEE) { p->anim = 0; B.wait = 0; }
     else {
         p->anim = 4; B.wait = 8;
@@ -2903,12 +3154,14 @@ static void ally_act(int pi)
         p->mp -= 6;
         if (k == 0) { h = clampi(h, 0, p_maxhp() - S.hp); S.hp += h; }
         else { PMember *q = &B.pm[k]; h = clampi(h, 0, q->maxhp - q->hp); q->hp += h; }
+        snd_play(SX_HEAL);
         bline(0, C_WHITE, L"%ls%ls 치유의 기도를 올렸다!", an, JI(an));
         bline(1, C_GREEN, L"%ls의 생명력이 %d 회복되었다!", ALLYS[B.pm[k].role], h);
         return;
     }
     if (act == 31) {
         int k, kills = 0;
+        snd_play(SX_SWING); snd_play(SX_HIT);
         bline(0, C_WHITE, L"%ls의 회전베기!", an);
         for (k = 0; k < B.n; k++) if (B.m[k].alive) { dmg_mon(k, clampi(p->atk * rr(70, 100) / 100 - B.m[k].def / 3, 1, 9999), k); if (!B.m[k].alive) kills++; }
         if (kills) bline(1, C_WHITE, L"%d마리를 쓰러뜨렸다!", kills);
@@ -2916,10 +3169,12 @@ static void ally_act(int pi)
     }
     if (act == 30) {
         d = p->atk * rr(100, 140) / 100;
+        snd_play(SX_SHRINE);
         bline(0, C_WHITE, L"%ls%ls 성스러운 빛을 내렸다!", an, JI(an));
     } else {
         d = p->atk * rr(85, 120) / 100 - B.m[t].def / 2;
         if (p->role == PR_BARB) d = d * 14 / 10;
+        snd_play(SX_HIT);
         bline(0, C_WHITE, L"%ls의 공격!", an);
     }
     if (d < 1) d = 1;
@@ -2999,6 +3254,7 @@ static void descend(void)
 {
     int cyc0, cyc1;
     area_info(S.floor, 0, &cyc0);
+    snd_play(SX_PORTAL);
     S.floor++;
     if (S.floor > S.maxfloor) S.maxfloor = S.floor;
     area_info(S.floor, 0, &cyc1);
@@ -3191,6 +3447,7 @@ static int area_first_floor(int a, int cyc)
 static int cur_cycle(void) { int c; area_info(S.floor, 0, &c); return c; }
 static void travel_to_floor(int f, const wchar_t *how)
 {
+    snd_play(SX_PORTAL);
     S.floor = f;
     if (S.floor > S.maxfloor) S.maxfloor = S.floor;
     gen_floor();
@@ -3314,12 +3571,14 @@ static void trade_act(void)
         if (S.gold < p) { wfmt(tmsg, 64, L"금화가 부족하다."); return; }
         if (!give_item(&copy)) { wfmt(tmsg, 64, L"가방이 가득 찼다."); return; }
         S.gold -= p;
+        snd_play(SX_TRADE);
         wfmt(tmsg, 64, L"%ls%ls 샀다. (-%d)", nm, JUL(nm), p);
         if (!IS_POT(it->kind) && it->kind != IK_TP) memset(it, 0, sizeof(Item));
         build_sell();
     } else {
         int p = item_value(it) / 4 + 1;
         S.gold += p;
+        snd_play(SX_TRADE);
         wfmt(tmsg, 64, L"%ls%ls 팔았다. (+%d)", nm, JUL(nm), p);
         memset(it, 0, sizeof(Item));
         build_sell();
@@ -3455,6 +3714,7 @@ static void on_feature(void)
         Item it;
         S.feat[S.py][S.px] = F_OPENCHEST;
         S.gold += g;
+        snd_play(SX_CHEST); snd_play_v(SX_COINS, 180);
         addlog(C_GOLD, L"상자를 열었다. 금화 %d 획득.", g);
         if (chance(55)) gen_item(&it, S.floor, 60);
         else make_potion(&it, chance(65) ? IK_HP : chance(80) ? IK_MP : IK_RJ);
@@ -3469,6 +3729,7 @@ static void on_feature(void)
     case F_SHRINE: {
         int r = rr(0, 4);
         S.feat[S.py][S.px] = 0;
+        snd_play(SX_SHRINE);
         if (r == 0) { S.hp = p_maxhp(); S.mp = p_maxmp(); addlog(C_BLUE, L"축복의 성소: 모든 상처가 아물었다."); }
         else if (r == 1) { S.str++; addlog(C_BLUE, L"힘의 성소: 힘이 1 올랐다."); }
         else if (r == 2) { S.ene++; addlog(C_BLUE, L"비전의 성소: 에너지가 1 올랐다."); }
@@ -3478,6 +3739,7 @@ static void on_feature(void)
         break;
     }
     case F_FOUNTAIN:
+        snd_play(SX_DRINK); snd_play_v(SX_HEAL, 160);
         S.hp = p_maxhp(); S.mp = p_maxmp();
         S.feat[S.py][S.px] = 0;
         addlog(rgb(120, 170, 255), L"맑은 샘물을 마셨다. 기운이 넘친다!");
@@ -3487,6 +3749,7 @@ static void on_feature(void)
         break;
     case F_WAYPOINT:
         addlog(rgb(140, 190, 255), L"길잡이석이 빛난다.");
+        snd_play(SX_PORTAL);
         warp_open();
         break;
     case F_PORTAL:
@@ -3497,6 +3760,7 @@ static void on_feature(void)
         }
         break;
     case F_HEALER:
+        snd_play(SX_HEAL);
         S.hp = p_maxhp(); S.mp = p_maxmp();
         addlog(rgb(255, 230, 160), L"치유사: \"빛이 그대를 지키기를.\"");
         addlog(C_GREEN, L"생명력과 마나가 모두 회복되었다.");
@@ -3518,9 +3782,10 @@ static void on_feature(void)
 static void step(int dir)
 {
     int nx = S.px + DX[dir], ny = S.py + DY[dir];
-    if (solid(nx, ny)) { addlog(C_GRAY, L"단단한 벽이 가로막고 있다."); return; }
+    if (solid(nx, ny)) { snd_play(SX_BUMP); addlog(C_GRAY, L"단단한 벽이 가로막고 있다."); return; }
     if (is_npc(S.feat[ny][nx])) { npc_interact(S.feat[ny][nx]); return; }
     S.px = nx; S.py = ny;
+    snd_play_v(SX_STEP, 150);
     mark_seen();
     S.regen++;
     if ((S.regen & 1) == 0 && S.mp < p_maxmp()) S.mp++;
@@ -3761,6 +4026,7 @@ static void inv_use(void)
         int i;
         for (i = 0; i < INV_N; i++) if (!S.inv[i].kind) {
             S.inv[i] = *it; memset(it, 0, sizeof(Item));
+            snd_play(SX_PICKUP); hero_dirty = 1;
             wfmt(invmsg, 64, L"%ls%ls 벗었다.", nm, JUL(nm));
             clamp_hpmp();
             return;
@@ -3777,6 +4043,7 @@ static void inv_use(void)
     if (IS_POT(it->kind)) {
         wchar_t b[52];
         drink(it, b, 52);
+        snd_play(SX_DRINK);
         wfmt(invmsg, 64, L"%ls", b);
         return;
     }
@@ -3785,6 +4052,7 @@ static void inv_use(void)
         Item tmp = S.eq[s];
         S.eq[s] = *it;
         *it = tmp;
+        snd_play(SX_PICKUP); hero_dirty = 1;
         wfmt(invmsg, 64, L"%ls%ls 장착했다.", nm, JUL(nm));
         clamp_hpmp();
     }
@@ -3800,6 +4068,15 @@ static void render_char(void)
     sv[0] = &S.str; sv[1] = &S.dex; sv[2] = &S.vit; sv[3] = &S.ene;
     stone(0, y0, GW, h, 34);
     goldframe(0, y0, GW, h);
+    {   /* the wanderer as currently equipped */
+        int pw, ph, pax, pay, pnf;
+        if (hero_build(7, 150, &pw, &ph, &pax, &pay, &pnf)) {
+            int gx = 208, gy = y0 + 128;
+            for (y = -2; y <= 2; y++) for (i = -16; i <= 16; i++)
+                if (i * i * 4 / 256 + y * y < 4) FB[(gy + y) * GW + gx + i] = shade(FB[(gy + y) * GW + gx + i], 120);
+            blit_frame(7, (tickc >> 1) & 7, pw, ph, pax, pay, gx, gy, 256, 256, 0, 0, 0);
+        }
+    }
     txtf(10, y0 + 5, C_GOLD, T_SHADOW, L"방랑자");
     txtf(GW - 10, y0 + 5, C_GOLD, T_RIGHT | T_SHADOW, L"레벨 %d", S.lvl);
     txtf(GW - 10, y0 + 19, rgb(200, 120, 255), T_RIGHT | T_SHADOW, L"봉인의 파편 %d/5", shards());
@@ -3909,8 +4186,9 @@ static void render_dead(void)
 
 static void render_menu(void)
 {
-    const wchar_t *it[3] = { L"모험 계속", L"저장하고 종료", confirm ? L"정말 포기? (한번 더)" : L"포기하고 처음으로" };
-    list_window(30, VY + 30, 180, it, 0, 3, sel, B_LIST, 22);
+    const wchar_t *it[5] = { L"모험 계속", snd_music_on ? L"음악: 켜짐" : L"음악: 꺼짐", snd_sfx_on ? L"효과음: 켜짐" : L"효과음: 꺼짐",
+                             L"저장하고 종료", confirm ? L"정말 포기? (한번 더)" : L"포기하고 처음으로" };
+    list_window(30, VY + 20, 180, it, 0, 5, sel, B_LIST, 22);
 }
 
 static int price(int k) { return k == IK_HP ? 25 + S.floor * 3 : k == IK_MP ? 25 + S.floor * 3 : 90 + S.floor * 6; }
@@ -4039,6 +4317,18 @@ static void stat_add(int i)
     else { S.ene++; S.mp += 2; }
 }
 
+static int music_last = -99;
+static void music_update(void)
+{
+    int w;
+    if (mode == M_TITLE) w = MU_TITLE;
+    else if (mode == M_DEAD || (mode == M_BATTLE && B.phase == BP_DEAD)) w = MU_DIE;
+    else if (mode == M_BATTLE) w = B.phase == BP_RESULT ? MU_WIN : B.boss ? MU_BOSS : MU_BATTLE;
+    else w = CA->camp ? MU_TOWN : MU_ACT1 + CA->act;
+    if (!snd_music_on) w = -1;
+    if (w != music_last) { music_last = w; snd_music(w); }
+}
+
 static void list_choose(int i)
 {
     if (mode == M_TITLE) {
@@ -4053,8 +4343,10 @@ static void list_choose(int i)
         } else if (i == 2) quitflag = 1;
     } else if (mode == M_MENU) {
         if (i == 0) mode = M_EXPLORE;
-        else if (i == 1) { save_game(); quitflag = 1; }
-        else if (i == 2) {
+        else if (i == 1) { snd_music_on = !snd_music_on; music_last = -99; }
+        else if (i == 2) snd_sfx_on = !snd_sfx_on;
+        else if (i == 3) { save_game(); quitflag = 1; }
+        else if (i == 4) {
             if (!confirm) { confirm = 1; return; }
             plat_delsave(); has_save = 0; mode = M_TITLE; sel = 0;
         }
@@ -4088,7 +4380,7 @@ static void list_choose(int i)
 static int list_len(void)
 {
     if (mode == M_TITLE) return 3;
-    if (mode == M_MENU) return 3;
+    if (mode == M_MENU) return 5;
     if (mode == M_SHOP) return 4;
     if (mode == M_PROMPT) return 2;
     if (mode == M_TALK) return talk_len();
@@ -4100,7 +4392,7 @@ static void use_belt(int s)
     wchar_t b[52], nm[40];
     if (!S.belt[s].kind) return;
     item_name(&S.belt[s], nm, 40);
-    drink(&S.belt[s], b, 52);
+    drink(&S.belt[s], b, 52); snd_play(SX_DRINK);
     addlog(C_WHITE, L"%ls%ls 마셨다.", nm, JUL(nm));
     addlog(C_GREEN, L"%ls", b);
 }
@@ -4191,6 +4483,7 @@ static void do_button(int id)
 void game_tap(int x, int y)
 {
     int id = hitbtn(x, y);
+    if (id != B_NONE) snd_play_v(SX_CLICK, 120);
     if (mode == M_STORY) { story_next(); return; }
     if (mode == M_BATTLE && id == B_NONE && y < PY &&
         (B.phase == BP_INTRO || B.phase == BP_EXEC || B.phase == BP_RESULT || B.phase == BP_DEAD)) {
@@ -4204,6 +4497,8 @@ void game_tap(int x, int y)
 void game_key(int k)
 {
     dirty = 1;
+    if (mode != M_EXPLORE && mode != M_BATTLE) snd_play_v(SX_CLICK, 120);
+    else if (mode == M_BATTLE && (k == K_OK || k == K_BACK)) snd_play_v(SX_CLICK, 120);
     if (mode == M_DEAD) { mode = M_TITLE; sel = 0; return; }
     if (mode == M_STORY) { story_next(); return; }
     if (mode == M_WARP) {
@@ -4323,6 +4618,7 @@ int game_tick(void)
 {
     int i, r = 0;
     tickc++;
+    music_update();
     if (mode == M_BATTLE) {
         int ph = B.phase, oi = B.oi;
         battle_tick();
@@ -4363,6 +4659,8 @@ int game_tick(void)
     } else if (mode == M_TITLE) {
         fire_step();
         r = 1;
+    } else if (mode == M_CHAR) {
+        if (!(tickc & 1)) r = 1;        /* idle animation of the equipped portrait */
     } else if (mode == M_DEAD) {
         if ((tickc & 7) == 0) r = 1;
     } else if (mode == M_EXPLORE || mode == M_CHAR) {
@@ -4382,6 +4680,7 @@ void game_init(int h, u16 *fb, unsigned seed)
 {
     GH = h; FB = fb;
     mdat_open();
+    hdat_open();
     rs = seed ? seed : 12345;
     layout();
     {
@@ -4399,6 +4698,14 @@ void game_init(int h, u16 *fb, unsigned seed)
 
 #ifdef HARNESS
 int harness_mode(void) { return mode; }
+void harness_equip(int w, int a, int h)
+{
+    S.eq[0].kind = w >= 0 ? IK_W : 0; S.eq[0].base = (unsigned char)(w >= 0 ? w : 0);
+    S.eq[2].kind = a >= 0 ? IK_A : 0; S.eq[2].base = (unsigned char)(a >= 0 ? a : 0);
+    S.eq[1].kind = h >= 0 ? IK_H : 0; S.eq[1].base = (unsigned char)(h >= 0 ? h : 0);
+    hero_dirty = 1;
+}
+void harness_charscreen(void) { mode = M_CHAR; }
 int harness_bphase(void) { return B.phase; }
 void harness_cheat(void)
 {

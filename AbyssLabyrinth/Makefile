@@ -3,7 +3,7 @@
 #   make pc   : 윈도우 PC 테스트판 (mingw-w64 필요)
 CE_CC  ?= arm-mingw32ce-gcc
 PC_CC  ?= i686-w64-mingw32-gcc
-SRC    = src/game.c src/plat_win.c
+SRC    = src/game.c src/audio.c src/plat_win.c
 
 all: wm pc
 
@@ -18,7 +18,7 @@ out/Abyss_WM61.exe: $(SRC) src/game.h
 
 out/Abyss_PC.exe: $(SRC) src/game.h
 	mkdir -p out
-	$(PC_CC) -std=gnu99 -O2 -mwindows -static -o $@ $(SRC) -lgdi32 -luser32
+	$(PC_CC) -std=gnu99 -O2 -mwindows -static -o $@ $(SRC) -lgdi32 -luser32 -lwinmm
 
 clean:
 	rm -rf out

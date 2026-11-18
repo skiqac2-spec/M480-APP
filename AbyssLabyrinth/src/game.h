@@ -32,4 +32,14 @@ int  plat_fread(void *f, void *buf, int n);
 int  plat_fseek(void *f, long off);
 void plat_fclose(void *f);
 
+/* ---- sound (audio.c) ---- */
+extern int snd_rate, snd_music_on, snd_sfx_on;
+void audio_init(void);
+void audio_mix(short *out, int n);       /* called from the platform audio thread */
+void snd_play(int id);
+void snd_play_v(int id, int vol);        /* vol 0..256 */
+void snd_music(int track);               /* -1 = silence */
+void plat_audio_lock(void);
+void plat_audio_unlock(void);
+
 #endif

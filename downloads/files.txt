@@ -5,10 +5,12 @@
 M480Web/M480Web.cab	303314	설치 파일 - 누르면 설치 (설치 중 브라우저가 종료됨)
 M480Web/M480Web.exe	484352	설치 없이 쓰는 실행 파일
 M480Web/README.txt	3947	사용 설명서
-@AbyssLabyrinth	심연의 미궁 (1인칭 던전 RPG)	2026-11-18 (2)
+@AbyssLabyrinth	심연의 미궁 (1인칭 던전 RPG)	2026-11-18 (3) 사운드·장비 외형·고해상도
 AbyssLabyrinth/Abyss_WM61.exe	136192	게임 실행 파일
-../AbyssLabyrinth/data/abyss_mon.dat	12543077	몬스터 그래픽 12MB (exe와 같은 폴더에 있어야 함)	AbyssLabyrinth/abyss_mon.dat
-../AbyssLabyrinth/README.txt	1965	게임 설명서	AbyssLabyrinth/README.txt
+../AbyssLabyrinth/data/abyss_mon.dat	48050376	몬스터 그래픽 46MB (exe와 같은 폴더)	AbyssLabyrinth/abyss_mon.dat
+../AbyssLabyrinth/data/abyss_hero.dat	17357332	주인공 장비별 그래픽 17MB (exe와 같은 폴더)	AbyssLabyrinth/abyss_hero.dat
+../AbyssLabyrinth/data/abyss_snd.dat	8093802	음악·효과음 8MB (exe와 같은 폴더)	AbyssLabyrinth/abyss_snd.dat
+../AbyssLabyrinth/README.txt	2844	게임 설명서	AbyssLabyrinth/README.txt
 @M480Music	M480 뮤직 (안 깨지는 음악 플레이어)	2026-11-18
 M480Music/M480Music.cab	49956	설치 파일 - 누르면 설치
 M480Music/M480Music.exe	76288	설치 없이 쓰는 실행 파일

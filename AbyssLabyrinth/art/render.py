@@ -7,6 +7,7 @@ import math
 import numpy as np
 
 SS = 2  # supersampling factor
+RS = 2  # resolution scale: art is stored at RS x the logical size; the game area-filters it down
 
 # ------------------------------------------------------------------ noise
 def _hash(ix, iy, seed):
@@ -95,8 +96,13 @@ def material(name, p, tu, tv, seed):
         col = p.get('col', C(150, 110, 90))
         cells = fbm(tu * 0.22, tv * 0.22, seed + 4)
         base[:] = col * (0.84 + 0.26 * f1[:, None])
-        crack = np.abs(cells - 0.5) < 0.016
-        base[crack] = col * 0.35
+        if p.get('cracks', True):
+            crack = np.abs(cells - 0.5) < 0.016
+            base[crack] = col * 0.35
+        else:   # living skin: soft subsurface-ish variation, faint veins
+            base[:] = col * (0.9 + 0.14 * f1[:, None]) + C(40, 8, 6) * (0.15 * f2[:, None])
+            vein = np.abs(fbm(tu * 0.1 + 2, tv * 0.1, seed + 7) - 0.5) < 0.008
+            base[vein] = base[vein] * 0.85 + C(60, 50, 90) * 0.15
         if p.get('lava'):
             glow = np.abs(cells - 0.5) < 0.022
             emis[glow] = C(255, 110, 20) * (0.7 + 0.6 * f2[glow, None])
@@ -206,6 +212,67 @@ def material(name, p, tu, tv, seed):
         alpha[tear] = 0.0
         alpha[~tear] = 0.95
         spec[:] = 0.3; shin = 20
+    elif name == 'leather':
+        col = p.get('col', C(96, 62, 36))
+        grain = fbm(tu * 0.4, tv * 0.4, seed + 2)
+        base[:] = col * (0.7 + 0.45 * f1[:, None]) * (0.85 + 0.25 * grain[:, None])
+        stitch = (np.abs(((tv * 0.5) % 6.0) - 3.0) < 0.25) & (np.sin(tu * 2.2) > 0.2)
+        base[stitch] = C(170, 150, 110)
+        wear = f2 > 0.72
+        base[wear] = base[wear] * 1.25
+        spec[:] = 0.22; shin = 10
+    elif name == 'mail':      # riveted chain mail: rows of rings
+        col = p.get('col', C(130, 128, 124))
+        u = tu * 0.9; v = tv * 0.9 + 0.5 * np.floor(tu * 0.9)
+        ring = np.abs(np.sqrt((u % 1.0 - 0.5) ** 2 + (v % 1.0 - 0.5) ** 2) - 0.32) < 0.13
+        base[:] = col * 0.22
+        base[ring] = col * (0.75 + 0.4 * f1[ring, None])
+        rust = f2 > p.get('rust', 0.8)
+        base[rust & ring] = C(110, 64, 34)
+        spec[:] = np.where(ring, 0.9, 0.05); shin = 26
+    elif name == 'scale':     # overlapping armour scales
+        col = p.get('col', C(70, 110, 70))
+        u = tu * 0.45; v = tv * 0.45 + 0.5 * np.floor(tu * 0.45)
+        fu = u % 1.0; fv = v % 1.0
+        edge = np.clip(1 - np.sqrt((fu - 0.5) ** 2 * 2 + fv ** 2) * 1.1, 0, 1)
+        base[:] = col * (0.35 + 0.8 * edge[:, None]) * (0.85 + 0.3 * f1[:, None])
+        rim = fv > 0.86
+        base[rim] = col * 0.2
+        if p.get('glow') is not None:
+            emis[rim] = p['glow'] * 0.6
+        spec[:] = 0.7 * edge; shin = 30
+    elif name == 'cloth':
+        col = p.get('col', C(120, 110, 96))
+        weave = 0.5 + 0.25 * np.sin(tu * 3.0) + 0.25 * np.sin(tv * 3.0)
+        fold = 0.5 + 0.5 * np.sin(tv * 1.4 + f1 * 3.0)
+        base[:] = col * (0.55 + 0.35 * fold[:, None] + 0.15 * weave[:, None])
+        if p.get('trim') is not None:
+            tr = (np.abs(tv) % 12.0) < 1.2
+            base[tr] = p['trim']
+        if p.get('bloody', False):
+            d = blood_streaks(0.25)
+            base[d] = C(70, 4, 4)
+        spec[:] = 0.03
+    elif name == 'plate':     # polished plate with bevels, engraving, optional trim / glow seams
+        col = p.get('col', C(150, 150, 156))
+        base[:] = col * (0.72 + 0.3 * f1[:, None])
+        scratch = np.abs(vnoise(tu * 0.08, tv * 1.6, seed + 3) - 0.5) < 0.03
+        base[scratch] = base[scratch] * 1.3
+        if p.get('etch') is not None:
+            et = np.abs(np.sin(tu * 0.9 + np.sin(tv * 0.7) * 2.0)) < 0.12
+            base[et] = p['etch']
+        if p.get('rust') is not None:
+            r = f2 > p['rust']
+            base[r] = C(100, 56, 28) * (0.7 + 0.5 * f1[r, None])
+        if p.get('glow') is not None:
+            g = np.abs(fbm(tu * 0.12, tv * 0.12, seed + 6) - 0.5) < 0.022
+            emis[g] = p['glow']; base[g] = p['glow'] * 0.5
+        spec[:] = p.get('spec', 1.0); shin = p.get('shin', 40)
+    elif name == 'glowmat':
+        col = p.get('col', C(160, 80, 255))
+        base[:] = col * (0.5 + 0.5 * f1[:, None])
+        emis[:] = col * (0.55 + 0.6 * f2[:, None])
+        spec[:] = 0.5; shin = 30
     elif name == 'fire':
         h = vnoise(tu * 0.3, tv * 0.3, seed)
         base[:] = C(255, 140, 30)
@@ -223,17 +290,30 @@ AMB = C(30, 28, 40)
 RIM = C(200, 60, 40)
 
 BUMP = {'rot': 0.55, 'raw': 0.6, 'gut': 0.45, 'stone': 0.8, 'skin': 0.4, 'bone': 0.35, 'fur': 0.6, 'chitin': 0.15,
-        'metal': 0.25, 'ice': 0.25, 'rag': 0.6, 'robe': 0.3, 'membrane': 0.3, 'wood': 0.3}
+        'metal': 0.25, 'ice': 0.25, 'rag': 0.6, 'robe': 0.3, 'membrane': 0.3, 'wood': 0.3, 'leather': 0.45,
+        'cloth': 0.25, 'plate': 0.08, 'scale': 0.2}
+
+FINE = {'rot': 0.22, 'raw': 0.25, 'gut': 0.2, 'stone': 0.3, 'skin': 0.07, 'bone': 0.18, 'fur': 0.3, 'chitin': 0.1,
+        'metal': 0.12, 'ice': 0.1, 'rag': 0.28, 'robe': 0.18, 'membrane': 0.2, 'wood': 0.25, 'leather': 0.2, 'mail': 0.1}
 
 def shade(mat, p, nrm, tu, tv, seed):
+    tu = tu / RS; tv = tv / RS          # texture space stays body-relative at any resolution
     base, spec, shin, emis, alpha = material(mat, p, tu, tv, seed)
     bmp = BUMP.get(mat, 0.0)
     if bmp:
         sc = 0.35 if mat != 'stone' else 0.2
         gx = vnoise(tu * sc + 0.5, tv * sc, seed + 21) - vnoise(tu * sc - 0.5, tv * sc, seed + 21)
         gy = vnoise(tu * sc, tv * sc + 0.5, seed + 21) - vnoise(tu * sc, tv * sc - 0.5, seed + 21)
+        # second, finer octave: pores, scratches, weave
+        sc2 = sc * 3.1
+        gx = gx + 0.32 * (vnoise(tu * sc2 + 0.5, tv * sc2, seed + 33) - vnoise(tu * sc2 - 0.5, tv * sc2, seed + 33))
+        gy = gy + 0.32 * (vnoise(tu * sc2, tv * sc2 + 0.5, seed + 33) - vnoise(tu * sc2, tv * sc2 - 0.5, seed + 33))
         nrm = nrm + bmp * np.stack([gx, gy, np.zeros_like(gx)], 1)
         nrm = nrm / (np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-9)
+    fn = FINE.get(mat, 0.0)
+    if fn:
+        g = vnoise(tu * 1.3 + 3.3, tv * 1.3, seed + 41) * 0.6 + vnoise(tu * 2.9, tv * 2.9 + 1.7, seed + 43) * 0.4
+        base = base * (1 - fn + 2 * fn * g)[:, None]
     d = np.clip(nrm @ L, 0, 1)
     sp = np.clip(nrm @ Hh, 0, 1) ** shin * spec
     rim = (1 - np.abs(nrm[:, 2])) ** 3 * 0.55
@@ -379,15 +459,38 @@ class Canvas:
         self.tri(P0, P1, P2, mat, p, seed, None if f is None else (f[0], f[1], f[2]))
         self.tri(P0, P2, P3, mat, p, seed, None if f is None else (f[0], f[2], f[3]))
 
-    def result(self):
-        """downsample 2x -> (H, W, 4) float, colour graded"""
+    def ambient_occlusion(self, strength=0.55):
+        """screen-space AO from the z-buffer: pixels sitting deeper than their surroundings get darker"""
+        from scipy.ndimage import gaussian_filter
+        cov = (self.a > 0.5).astype(np.float32)
+        if cov.sum() < 4:
+            return
+        z = np.where(cov > 0, self.z, 0).astype(np.float32)
+        sig = 2.2 * SS * RS
+        zb = gaussian_filter(z * cov, sig) / (gaussian_filter(cov, sig) + 1e-6)
+        zb2 = gaussian_filter(z * cov, sig * 0.4) / (gaussian_filter(cov, sig * 0.4) + 1e-6)
+        rng_ = 3.0 * RS
+        occ = np.clip((z - zb) / rng_, 0, 1) * 0.65 + np.clip((z - zb2) / (rng_ * 0.5), 0, 1) * 0.35
+        k = 1 - strength * occ * cov
+        self.col *= k[..., None]
+
+    def zdown(self):
+        """per output pixel: nearest covered depth (for layered compositing)"""
+        H, W = self.H // SS, self.W // SS
+        z = np.where(self.a > 0.02, self.z, 1e9)
+        return z.reshape(H, SS, W, SS).min(axis=(1, 3))
+
+    def result(self, ao=True):
+        """downsample SS x -> (H, W, 4) float, colour graded"""
+        if ao:
+            self.ambient_occlusion()
         H, W = self.H // SS, self.W // SS
         a = self.a.reshape(H, SS, W, SS).mean(axis=(1, 3))
         col = (self.col * self.a[..., None]).reshape(H, SS, W, SS, 3).mean(axis=(1, 3))
         col = col / np.maximum(a[..., None], 1e-6)
         # contact shading toward the ground
         ys = self.oy - (np.arange(H) + 0.5)
-        gfac = 0.55 + 0.45 * np.clip(ys / 22.0, 0, 1)
+        gfac = 0.55 + 0.45 * np.clip(ys / (22.0 * RS), 0, 1)
         col = col * gfac[:, None, None]
         # grim colour grade: slight desaturation + contrast + darkening
         lum = (col * np.array([0.3, 0.55, 0.15])).sum(-1, keepdims=True)

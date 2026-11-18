@@ -1,15 +1,15 @@
 """Render all monsters (24 frames each) and pack them into abyss_mon.dat.
 
 File format (little endian):
-  'AMON' u16 version u16 count, then count x u32 block offsets
-  block: u16 W, H, anchor_x, ground_y, nframes ; then per frame: u32 size + data
-  frame data, per row: u8 nseg, per segment: u8 x, u8 len, len x u16 rgb565, len x u8 alpha
+  'AMON' u16 version(2) u16 count, then count x u32 block offsets
+  block: u16 W, H, anchor_x, ground_y, nframes, scale(256 = 1 stored px per logical px); then per frame: u32 size + data
+  frame data, per row: u8 nseg, per segment: u16 x, u8 len, len x u16 rgb565, len x u8 alpha
 """
 import sys, os, struct, time
 import numpy as np
 from multiprocessing import Pool
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render import Canvas, Model, View
+from render import Canvas, Model, View, RS
 from species import S, NFRAMES
 
 NF = 24
@@ -19,8 +19,8 @@ def render_species(i):
     W, H, ox, oy = cv
     frames = []
     for f in range(NFRAMES.get(key, NF)):
-        c = Canvas(W, H, ox, oy)
-        m = Model(View(yaw, 0.12))
+        c = Canvas(W * RS, H * RS, ox * RS, oy * RS)
+        m = Model(View(yaw, 0.12, scale=RS))
         fn(m, p, f)
         m.draw(c)
         frames.append(c.result())
@@ -46,7 +46,7 @@ def pack_frame(img):
                 x += 1
         out += struct.pack('<B', len(segs))
         for s, n in segs:
-            out += struct.pack('<BB', s, n)
+            out += struct.pack('<HB', s, n)
             out += c565[y, s:s + n].astype('<u2').tobytes()
             out += a[y, s:s + n].astype(np.uint8).tobytes()
     return bytes(out)
@@ -59,12 +59,12 @@ def main(outpath, preview_dir=None):
     for i in range(len(S)):
         key, fn, p, cv, yaw = S[i]
         W, H, ox, oy = cv
-        b = bytearray(struct.pack('<HHHHH', W, H, ox, oy, len(res[i])))
+        b = bytearray(struct.pack('<HHHHHH', W * RS, H * RS, ox * RS, oy * RS, len(res[i]), RS * 256))
         for fr in res[i]:
             d = pack_frame(fr)
             b += struct.pack('<I', len(d)) + d
         blocks.append(bytes(b))
-    hdr = b'AMON' + struct.pack('<HH', 1, len(S))
+    hdr = b'AMON' + struct.pack('<HH', 2, len(S))
     off = len(hdr) + 4 * len(S)
     table = b''
     for b in blocks:

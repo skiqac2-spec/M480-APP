@@ -4,6 +4,96 @@ import numpy as np
 from render import V, lerp, norm, rot_x, rot_z, rot_y, sn, phase, C
 
 # =================================================================== BIPED
+
+# ------------------------------------------------------------------ anatomy detail helpers
+def _perp(d):
+    """two unit vectors perpendicular to d: 'fwd' (towards -z as much as possible) and 'side'"""
+    fz = V(0, 0, -1)
+    side = np.cross(d, fz)
+    if np.linalg.norm(side) < 1e-4:
+        side = V(1, 0, 0)
+    side = norm(side)
+    fwd = norm(np.cross(side, d))
+    if fwd[2] > 0:
+        fwd = -fwd
+    return fwd, side
+
+
+def muscled_limb(m, A, B, r0, r1, mat, p, kind, seed=0.0):
+    """limb segment with muscle bellies instead of a plain tube"""
+    d = norm(B - A); L = float(np.linalg.norm(B - A))
+    fwd, side = _perp(d)
+    m.cap(A, B, r0 * 0.9, r1 * 0.88, mat, p, seed)
+    if kind == 'thigh':
+        m.cap(lerp(A, B, 0.12) + fwd * r0 * 0.22, lerp(A, B, 0.62) + fwd * r0 * 0.18, r0 * 0.86, r0 * 0.7, mat, p, seed + 1)   # quads
+        m.cap(lerp(A, B, 0.15) - fwd * r0 * 0.2, lerp(A, B, 0.7) - fwd * r0 * 0.12, r0 * 0.8, r0 * 0.6, mat, p, seed + 2)    # hamstrings
+        m.cap(lerp(A, B, 0.55) + side * r0 * 0.3 + fwd * r0 * 0.2, lerp(A, B, 0.85) + side * r0 * 0.15 + fwd * r0 * 0.25, r0 * 0.5, r1 * 0.55, mat, p, seed + 3)
+        m.ell(B + fwd * r1 * 0.7 + d * r1 * 0.1, r1 * 0.55, r1 * 0.6, r1 * 0.4, mat, p, seed + 4)                     # kneecap
+    elif kind == 'calf':
+        m.cap(lerp(A, B, 0.08) - fwd * r0 * 0.3, lerp(A, B, 0.5) - fwd * r0 * 0.25, r0 * 0.95, r0 * 0.7, mat, p, seed + 1)    # gastrocnemius
+        m.cap(lerp(A, B, 0.1) + fwd * r0 * 0.35, lerp(A, B, 0.9) + fwd * r1 * 0.3, r0 * 0.45, r1 * 0.4, mat, p, seed + 2)    # shin
+        m.ell(B + side * r1 * 0.75, r1 * 0.35, r1 * 0.4, r1 * 0.35, mat, p, seed + 3)                                  # ankle
+        m.ell(B - side * r1 * 0.75, r1 * 0.35, r1 * 0.4, r1 * 0.35, mat, p, seed + 3)
+    elif kind == 'upper':
+        m.cap(lerp(A, B, 0.2) + fwd * r0 * 0.3, lerp(A, B, 0.75) + fwd * r0 * 0.25, r0 * 0.78, r0 * 0.6, mat, p, seed + 1)   # biceps
+        m.cap(lerp(A, B, 0.15) - fwd * r0 * 0.3, lerp(A, B, 0.7) - fwd * r0 * 0.2, r0 * 0.8, r0 * 0.58, mat, p, seed + 2)    # triceps
+    elif kind == 'fore':
+        m.cap(lerp(A, B, 0.05) + side * r0 * 0.25, lerp(A, B, 0.55) + side * r0 * 0.1, r0 * 0.95, r1 * 0.75, mat, p, seed + 1)
+        m.ell(A - fwd * r0 * 0.4, r0 * 0.55, r0 * 0.55, r0 * 0.55, mat, p, seed + 2)                                   # elbow
+
+
+def hand(m, ha, hd, H, mat, p, grip=0.0, w=1.0, nails=None, seed=0.0):
+    """palm + 4 two-segment fingers + thumb. grip 0 = relaxed, 1 = closed fist around a handle"""
+    fwd, side = _perp(hd)
+    pr = 0.022 * H * w
+    palm = ha + hd * 0.018 * H
+    m.ell(palm, pr * 1.05, pr * 1.15, pr * 0.62, mat, p, seed)
+    for i in range(4):
+        o = (i - 1.5) * 0.36 * pr
+        k0 = palm + hd * pr * 0.95 + side * o
+        bend = 0.35 + 0.9 * grip
+        d1 = norm(hd * math.cos(bend * 0.6) + fwd * math.sin(bend * 0.6))
+        k1 = k0 + d1 * pr * (0.75 - abs(i - 1.5) * 0.08)
+        d2 = norm(hd * math.cos(bend * 1.4) + fwd * math.sin(bend * 1.4))
+        k2 = k1 + d2 * pr * (0.6 - abs(i - 1.5) * 0.06)
+        fr = pr * 0.24
+        m.cap(k0, k1, fr, fr * 0.92, mat, p, seed + i)
+        m.cap(k1, k2, fr * 0.92, fr * 0.75, mat, p, seed + i)
+        if nails is not None:
+            m.cap(k2, k2 + d2 * pr * 0.35, fr * 0.6, fr * 0.15, 'bone', {'col': nails})
+    tb = palm - side * pr * 0.8 + fwd * pr * 0.2
+    td = norm(hd * 0.6 + fwd * (0.7 + grip * 0.3) - side * 0.3)
+    m.cap(tb, tb + td * pr * 0.7, pr * 0.3, pr * 0.25, mat, p, seed + 7)
+    m.cap(tb + td * pr * 0.7, tb + td * pr * 1.2 + side * pr * 0.25 * grip, pr * 0.25, pr * 0.2, mat, p, seed + 8)
+
+
+def foot(m, ft, H, th, mat, p, toes=True, seed=0.0):
+    fw = 0.03 * H * max(th, 0.5)
+    m.ell(ft + V(0, 0.012 * H, -0.025 * H), fw, 0.017 * H, 0.05 * H, mat, p, seed)
+    m.ell(ft + V(0, 0.016 * H, 0.012 * H), fw * 0.8, 0.02 * H, 0.025 * H, mat, p, seed + 1)       # heel
+    if toes:
+        for i in range(5):
+            x = (i - 2) * fw * 0.36
+            ln = 0.022 * H * (1.25 if i == 1 else 1.0 - abs(i - 1) * 0.08)
+            a = ft + V(x, 0.008 * H, -0.06 * H)
+            m.cap(a, a + V(x * 0.15, -0.002 * H, -ln), 0.0075 * H * (1.25 if i == 1 else 0.9), 0.006 * H, mat, p, seed + 2 + i)
+
+
+def torso_detail(m, J, H, b, skin, sp, seed=0.0):
+    """collarbones, trapezius, shoulder blades, spine ridge, obliques"""
+    nk, ch, pv = J['neck'], J['chest'], J['pelvis']
+    up = norm(nk - pv)
+    for s in 'LR':
+        sh = J['sh' + s]
+        m.cap(nk + V(0, -0.005 * H, 0.014 * H), lerp(nk, sh, 0.8) + V(0, -0.012 * H, 0.016 * H), 0.024 * H * b, 0.016 * H * b, skin, sp, seed)    # trapezius
+        m.cap(nk + V(0, -0.03 * H, -0.03 * H), sh + V(0, -0.006 * H, -0.03 * H), 0.009 * H, 0.008 * H, skin, sp, seed + 1)       # collarbone
+        sx = -1 if s == 'L' else 1
+        m.ell(ch + V(sx * 0.052 * H * b, 0.022 * H, 0.046 * H), 0.04 * H * b, 0.05 * H, 0.03 * H, skin, sp, seed + 2)          # shoulder blade
+        m.cap(ch + V(sx * 0.1 * H * b, 0.02 * H, 0.0), lerp(pv, ch, 0.35) + V(sx * 0.075 * H * b, 0, 0.0), 0.04 * H * b, 0.035 * H * b, skin, sp, seed + 3)  # lats / obliques
+    for i in range(7):                                                                             # spine ridge
+        c = lerp(pv, nk, 0.12 + i * 0.13)
+        m.ell(c + V(0, 0, 0.068 * H * (1.0 if 2 < i < 6 else 0.9)), 0.008 * H, 0.009 * H, 0.008 * H, skin, sp, seed + 4 + i)
+
 def biped_pose(p, f):
     H = p['H']; b = p.get('build', 1.0)
     st, t = phase(f)
@@ -201,6 +291,12 @@ def head(m, p, J, H):
             m.ell(hd + V(sx * 0.02 * hr, 0.0, -0.05 * hr), 0.014 * hr, 0.011 * hr, 0.008 * hr, 'dark')
             m.ell(hd + V(sx * 0.02 * hr, 0.0, -0.054 * hr), 0.007 * hr, 0.006 * hr, 0.004 * hr, 'eye', {'col': eyes})
         m.ell(hd + V(0, -0.012 * hr, -0.058 * hr), 0.01 * hr, 0.016 * hr, 0.01 * hr, skin, sp)
+        m.cap(hd + V(0, 0.008 * hr, -0.056 * hr), hd + V(0, -0.016 * hr, -0.064 * hr), 0.005 * hr, 0.007 * hr, skin, sp)      # nose bridge
+        for sx in (-1, 1):
+            m.ell(hd + V(sx * 0.03 * hr, -0.016 * hr, -0.046 * hr), 0.014 * hr, 0.01 * hr, 0.01 * hr, skin, sp)           # cheekbones
+            if not p.get('ears'):
+                m.ell(hd + V(sx * 0.052 * hr, -0.002 * hr, 0.004 * hr), 0.007 * hr, 0.016 * hr, 0.011 * hr, skin, sp)      # ears
+                m.ell(hd + V(sx * 0.055 * hr, -0.002 * hr, 0.002 * hr), 0.003 * hr, 0.009 * hr, 0.005 * hr, 'dark')
         # mouth & jaw
         mo = 0.012 + 0.03 * jaw
         m.ell(hd + V(0, -0.04 * hr - mo * hr * 0.5, -0.05 * hr), 0.026 * hr, (mo + 0.006) * hr, 0.012 * hr, 'mouth')
@@ -297,9 +393,22 @@ def biped(m, p, f):
     for s in 'LR':
         hi, kn, ft = J['hi' + s], J['kn' + s], J['ft' + s]
         lgm = p.get('legmat', limb); lgp = p.get('legp', lp)
-        m.cap(hi, kn, 0.058 * H * th * b, 0.04 * H * th * b, lgm, lgp)
-        m.cap(kn, ft, 0.04 * H * th * b, 0.026 * H * th, p.get('bootmat', lgm), p.get('bootp', lgp))
-        m.ell(ft + V(0, 0.01 * H, -0.03 * H), 0.03 * H * max(th, 0.5), 0.016 * H, 0.05 * H, p.get('bootmat', lgm), p.get('bootp', lgp))
+        if bonesonly or p.get('fat'):
+            m.cap(hi, kn, 0.058 * H * th * b, 0.04 * H * th * b, lgm, lgp)
+            m.cap(kn, ft, 0.04 * H * th * b, 0.026 * H * th, p.get('bootmat', lgm), p.get('bootp', lgp))
+            if bonesonly:
+                m.ell(kn + V(0, 0, -0.012 * H), 0.016 * H, 0.018 * H, 0.012 * H, 'bone', lp)
+        else:
+            muscled_limb(m, hi, kn, 0.058 * H * th * b, 0.04 * H * th * b, lgm, lgp, 'thigh', 3.1 if s == 'L' else 5.7)
+            muscled_limb(m, kn, ft, 0.04 * H * th * b, 0.026 * H * th, p.get('bootmat', lgm), p.get('bootp', lgp), 'calf', 1.3 if s == 'L' else 2.9)
+        if bonesonly:
+            for i in range(5):
+                x = (i - 2) * 0.009 * H
+                m.cap(ft + V(x, 0.012 * H, -0.01 * H), ft + V(x * 1.3, 0.004 * H, -0.075 * H), 0.004 * H, 0.0035 * H, 'bone', lp)
+            m.ell(ft + V(0, 0.014 * H, 0.012 * H), 0.012 * H, 0.012 * H, 0.016 * H, 'bone', lp)
+        else:
+            barefoot = 'bootmat' not in p and p.get('legmat', limb) == limb
+            foot(m, ft, H, th, p.get('bootmat', lgm), p.get('bootp', lgp), toes=barefoot and not p.get('claws_feet'))
         if p.get('claws_feet'):
             for i in (-1, 0, 1):
                 m.cap(ft + V(i * 0.012 * H, 0.005 * H, -0.07 * H), ft + V(i * 0.014 * H, 0.0, -0.1 * H), 0.004 * H, 0.001 * H, 'bone', {'col': C(50, 40, 30)})
@@ -319,6 +428,8 @@ def biped(m, p, f):
         m.ell(J['chest'] + V(0, -0.005 * H, 0), 0.125 * H * b, 0.105 * H, 0.075 * H, skin, sp)
         m.ell(lerp(J['pelvis'], J['chest'], 0.45), 0.095 * H * b, 0.09 * H, 0.065 * H, skin, sp)
         m.ell(J['pelvis'], 0.095 * H * b, 0.06 * H, 0.06 * H, p.get('loin', skin), p.get('loinp', sp))
+        if not p.get('fat') and skin not in ('rag',):
+            torso_detail(m, J, H, b, skin, sp, 9.0)
         if p.get('fat'):
             m.ell(J['belly'] + V(0, -0.02 * H, -0.04 * H), 0.15 * H * b, 0.14 * H, 0.12 * H, skin, sp)
             m.ell(J['belly'] + V(-0.04 * H, -0.04 * H, -0.15 * H), 0.03 * H, 0.025 * H, 0.012 * H, 'raw')
@@ -338,8 +449,10 @@ def biped(m, p, f):
             m.ell(g0, 0.045 * H, 0.035 * H, 0.02 * H, 'raw')
             m.chain(pts, 0.018 * H, 0.012 * H, 'gut')
         for w in p.get('wounds', []):
-            c = J[w[0]] + V(w[1] * H, w[2] * H, -0.07 * H * w[4] if len(w) > 4 else -0.06 * H)
-            m.ell(c, w[3] * H, w[3] * H * 0.8, w[3] * H * 0.4, 'raw')
+            c = J[w[0]] + V(w[1] * H, w[2] * H, -0.066 * H * w[4] if len(w) > 4 else -0.056 * H)
+            m.ell(c, w[3] * H * 1.1, w[3] * H * 0.85, w[3] * H * 0.28, 'raw')
+            m.ell(c + V(0, -w[3] * H * 0.2, -w[3] * H * 0.12), w[3] * H * 0.5, w[3] * H * 0.3, w[3] * H * 0.15, 'blood')
+            m.cap(c + V(w[3] * H * 0.2, -w[3] * H * 0.6, -w[3] * H * 0.12), c + V(w[3] * H * 0.3, -w[3] * H * 2.6, -w[3] * H * 0.05), w[3] * H * 0.18, w[3] * H * 0.08, 'blood')
         if p.get('apron'):
             a0 = J['chest'] + V(-0.1 * H, 0.0, -0.09 * H); a1 = J['chest'] + V(0.1 * H, 0.0, -0.09 * H)
             a2 = J['pelvis'] + V(0.11 * H, -0.18 * H, -0.12 * H); a3 = J['pelvis'] + V(-0.11 * H, -0.18 * H, -0.12 * H)
@@ -374,11 +487,21 @@ def biped(m, p, f):
         aw = p.get('armw', 1.0) * th
         if not bonesonly:
             m.ell(sh_, 0.05 * H * b * max(aw, 0.6), 0.045 * H, 0.05 * H, skin, sp)
-        m.cap(sh_, el, 0.04 * H * aw, 0.032 * H * aw, p.get('armmat', limb), p.get('armp', lp))
-        m.cap(el, ha, 0.032 * H * aw, 0.024 * H * aw, p.get('bracer', p.get('armmat', limb)), p.get('bracerp', p.get('armp', lp)))
         hd = norm(ha - el)
-        m.ell(ha + hd * 0.02 * H, 0.025 * H * max(aw, 0.6), 0.03 * H, 0.02 * H, limb, lp)
-        if p.get('claws') or (bonesonly and s == 'L'):
+        if bonesonly:
+            m.cap(sh_, el, 0.04 * H * aw, 0.032 * H * aw, p.get('armmat', limb), p.get('armp', lp))
+            m.cap(el, ha, 0.032 * H * aw, 0.024 * H * aw, p.get('bracer', p.get('armmat', limb)), p.get('bracerp', p.get('armp', lp)))
+            m.cap(el + V(0.006 * H, 0, 0), ha + V(0.006 * H, 0, 0), 0.008 * H, 0.007 * H, 'bone', lp)
+            hand(m, ha, hd, H, 'bone', lp, grip=0.8 if (s == 'R' and p.get('weapon')) else 0.2, w=0.75)
+        else:
+            muscled_limb(m, sh_, el, 0.04 * H * aw, 0.032 * H * aw, p.get('armmat', limb), p.get('armp', lp), 'upper', 4.4 if s == 'L' else 6.6)
+            muscled_limb(m, el, ha, 0.032 * H * aw, 0.024 * H * aw, p.get('bracer', p.get('armmat', limb)), p.get('bracerp', p.get('armp', lp)), 'fore', 7.7 if s == 'L' else 8.8)
+            if not p.get('claws'):
+                hand(m, ha, hd, H, limb, lp, grip=0.85 if (s == 'R' and p.get('weapon')) else 0.25, w=max(aw, 0.6),
+                     nails=C(70, 56, 40) if skin in ('rot', 'rag') else None, seed=2.2 if s == 'L' else 3.3)
+            else:
+                m.ell(ha + hd * 0.02 * H, 0.025 * H * max(aw, 0.6), 0.03 * H, 0.02 * H, limb, lp)
+        if p.get('claws'):
             for i in (-1, 0, 1):
                 a = ha + hd * 0.035 * H + V(i * 0.01 * H, 0, 0)
                 m.cap(a, a + hd * 0.06 * H * (1.6 if p.get('claws') else 0.8) + V(i * 0.01 * H, 0, -0.01 * H), 0.005 * H, 0.0015 * H,
