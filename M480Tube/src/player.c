@@ -367,6 +367,7 @@ static AVFormatContext *open_fmt(Src *s, int config_post, volatile int *quit, ch
 		if (*quit) return NULL;
 		src_diag(s, fferr, d, sizeof d);
 		if (strlen(all) + strlen(d) + 2 < sizeof all) { if (all[0]) strcat(all, "\n"); strcat(all, d); }
+		if (s->failed && s->first_status == 0) break; /* network down: other request styles won't help */
 		if (!src_next_mode(s, config_post)) break;
 	}
 	strncpy(diag, all, diaglen - 1);
@@ -397,7 +398,7 @@ struct Player {
 	HANDLE vth, ath;
 	volatile int quit;
 	volatile int state;
-	char msg[800];
+	char msg[1100];
 	volatile int paused;
 	volatile LONG seek_gen;
 	volatile long seek_ms;
@@ -730,6 +731,24 @@ static void draw_overlay(Player *p, HDC dc)
 		int cx = (play.left + play.right) / 2, cy = (play.top + play.bottom) / 2;
 		fill(dc, cx - 8, cy - 9, cx - 3, cy + 9, RGB(255, 255, 255));
 		fill(dc, cx + 3, cy - 9, cx + 8, cy + 9, RGB(255, 255, 255));
+	}
+	/* errors are shown over the (unused) picture area, in a small font */
+	if (p->state == PS_ERROR) {
+		HFONT of;
+		LOGFONTW lf;
+		HFONT smf;
+		memset(&lf, 0, sizeof lf);
+		lf.lfHeight = -11;
+		smf = CreateFontIndirectW(&lf);
+		fill(dc, 0, TB, p->LW, y, RGB(0, 0, 0));
+		SetRect(&rc, 4, TB + 2, p->LW - 4, y - 2);
+		SetTextColor(dc, RGB(255, 140, 140));
+		of = (HFONT)SelectObject(dc, smf);
+		text_u8(dc, p->msg, &rc, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+		SelectObject(dc, of);
+		DeleteObject(smf);
+		if (p->ori == ORI_PORTRAIT) fill(dc, 0, y + BB, p->LW, p->LH, RGB(0, 0, 0));
+		return;
 	}
 	/* portrait: info area */
 	if (p->ori == ORI_PORTRAIT) {
@@ -1086,7 +1105,9 @@ static DWORD WINAPI video_thread(LPVOID arg)
 		fc = open_fmt(&p->vs, p->media_post, &p->quit, diag, sizeof diag);
 		if (!fc) {
 			if (p->quit) return 0;
-			_snprintf(msg, sizeof msg, "영상을 열 수 없습니다. 이 화면을 사진으로 보내 주세요.\n%s", diag);
+			char st[260];
+			player_selftest(st, sizeof st);
+			_snprintf(msg, sizeof msg, "영상을 열 수 없습니다. 이 화면을 사진으로 보내 주세요.\n%s\n%s", diag, st);
 			msg[sizeof msg - 1] = 0;
 			set_error(p, msg);
 			return 0;
@@ -1221,6 +1242,95 @@ out:
 	avcodec_free_context(&cc);
 	close_fmt(&fc);
 	return 0;
+}
+
+/* ---------------- engine self-test (embedded tiny DASH files) ---------------- */
+#include "selftest_data.h"
+typedef struct { const unsigned char *d; int len, pos; } MemIO;
+static int mem_read(void *o, uint8_t *buf, int n)
+{
+	MemIO *m = (MemIO *)o;
+	if (m->pos >= m->len) return AVERROR_EOF;
+	if (n > m->len - m->pos) n = m->len - m->pos;
+	memcpy(buf, m->d + m->pos, n);
+	m->pos += n;
+	return n;
+}
+static int64_t mem_seek(void *o, int64_t off, int whence)
+{
+	MemIO *m = (MemIO *)o;
+	if (whence & AVSEEK_SIZE) return m->len;
+	whence &= ~AVSEEK_FORCE;
+	if (whence == SEEK_CUR) off += m->pos;
+	else if (whence == SEEK_END) off += m->len;
+	if (off < 0 || off > m->len) return AVERROR(EINVAL);
+	m->pos = (int)off;
+	return off;
+}
+
+static void selftest_one(const unsigned char *d, int len, enum AVMediaType t, char *out, int outlen)
+{
+	MemIO m;
+	AVFormatContext *fc = avformat_alloc_context();
+	unsigned char *b = (unsigned char *)av_malloc(4096);
+	AVIOContext *io;
+	AVCodecContext *cc = NULL;
+	const AVCodec *dec;
+	AVPacket *pkt = NULL;
+	AVFrame *fr = NULL;
+	int r, idx = -1, frames = 0, pkts = 0;
+	unsigned i;
+	char e[64] = "";
+	m.d = d; m.len = len; m.pos = 0;
+	io = avio_alloc_context(b, 4096, 0, &m, mem_read, NULL, mem_seek);
+	fc->pb = io;
+	fc->flags |= AVFMT_FLAG_CUSTOM_IO;
+	r = avformat_open_input(&fc, NULL, av_find_input_format("mov"), NULL);
+	if (r < 0) { av_strerror(r, e, sizeof e); _snprintf(out, outlen, "열기 실패(%s)", e); fc = NULL; goto done; }
+	for (i = 0; i < fc->nb_streams; i++) if (fc->streams[i]->codecpar->codec_type == t) { idx = (int)i; break; }
+	if (idx < 0) { _snprintf(out, outlen, "트랙 없음"); goto done; }
+	dec = t == AVMEDIA_TYPE_AUDIO ? avcodec_find_decoder_by_name("aac_fixed") : avcodec_find_decoder(fc->streams[idx]->codecpar->codec_id);
+	if (!dec) { _snprintf(out, outlen, "디코더 없음"); goto done; }
+	cc = avcodec_alloc_context3(dec);
+	avcodec_parameters_to_context(cc, fc->streams[idx]->codecpar);
+	cc->thread_count = 1;
+	EnterCriticalSection(&g_ffcs);
+	r = avcodec_open2(cc, dec, NULL);
+	LeaveCriticalSection(&g_ffcs);
+	if (r < 0) { av_strerror(r, e, sizeof e); _snprintf(out, outlen, "디코더 열기 실패(%s)", e); goto done; }
+	pkt = av_packet_alloc();
+	fr = av_frame_alloc();
+	while (av_read_frame(fc, pkt) >= 0) {
+		if (pkt->stream_index == idx) {
+			pkts++;
+			if (avcodec_send_packet(cc, pkt) >= 0)
+				while (avcodec_receive_frame(cc, fr) == 0) { frames++; av_frame_unref(fr); }
+		}
+		av_packet_unref(pkt);
+	}
+	avcodec_send_packet(cc, NULL);
+	while (avcodec_receive_frame(cc, fr) == 0) { frames++; av_frame_unref(fr); }
+	_snprintf(out, outlen, "%s (패킷 %d, 프레임 %d)", frames > 0 ? "정상" : "디코딩 실패", pkts, frames);
+done:
+	out[outlen - 1] = 0;
+	av_frame_free(&fr);
+	av_packet_free(&pkt);
+	avcodec_free_context(&cc);
+	if (fc) avformat_close_input(&fc);
+	av_freep(&io->buffer);
+	avio_context_free(&io);
+}
+
+void player_selftest(char *out, int len)
+{
+	char v[120], a[120];
+	if (!g_ffcs_init) { InitializeCriticalSection(&g_ffcs); g_ffcs_init = 1; }
+	av_force_cpu_flags(g_tune.asm_on ? -1 : 0);
+	selftest_one(g_test_v, sizeof g_test_v, AVMEDIA_TYPE_VIDEO, v, sizeof v);
+	selftest_one(g_test_a, sizeof g_test_a, AVMEDIA_TYPE_AUDIO, a, sizeof a);
+	_snprintf(out, len, "엔진 자가진단 - 영상: %s / 소리: %s", v, a);
+	out[len - 1] = 0;
+	tube_log("%s", out);
 }
 
 /* ---------------- public ---------------- */

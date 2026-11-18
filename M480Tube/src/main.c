@@ -19,7 +19,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "1.3"
+#define VERSION   "1.4"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -40,7 +40,7 @@ unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th)
 #define GDIFLUSH() GdiFlush()
 #endif
 
-enum { M_Q240 = 1000, M_Q144, M_Q360, M_ORI_P, M_ORI_L, M_STATS, M_LOOP, M_UPDATE, M_ABOUT, M_EXIT };
+enum { M_Q240 = 1000, M_Q144, M_Q360, M_ORI_P, M_ORI_L, M_STATS, M_LOOP, M_UPDATE, M_SELFTEST, M_ABOUT, M_EXIT };
 
 /* ---------------- state ---------------- */
 static HINSTANCE g_inst;
@@ -666,6 +666,7 @@ static void show_menu(void)
 	AppendMenuW(m, MF_STRING | (g_stats ? MF_CHECKED : 0), M_STATS, L"재생 중 초당 프레임 표시");
 	AppendMenuW(m, MF_SEPARATOR, 0, NULL);
 	AppendMenuW(m, MF_STRING, M_UPDATE, L"유튜브 연결 설정 다시 받기");
+	AppendMenuW(m, MF_STRING, M_SELFTEST, L"재생 엔진 자가진단");
 	AppendMenuW(m, MF_STRING, M_ABOUT, L"정보");
 	AppendMenuW(m, MF_STRING, M_EXIT, L"종료");
 	GetClientRect(g_hwnd, &cr);
@@ -827,8 +828,17 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		case M_ORI_L: g_start_ori = ORI_LAND_LEFT; settings_save(); return 0;
 		case M_STATS: g_stats = !g_stats; settings_save(); return 0;
 		case M_UPDATE: status_set("설정을 받는 중..."); start_config_update(1); return 0;
+		case M_SELFTEST: {
+			char r[300];
+			WCHAR *w;
+			player_selftest(r, sizeof r);
+			w = utf8_to_w(r, -1, NULL);
+			MessageBoxW(h, w ? w : L"?", APPNAME, MB_OK);
+			free(w);
+			return 0;
+		}
 		case M_ABOUT:
-			MessageBoxW(h, L"M480Tube 1.3\nSCH-M480용 유튜브 뷰어\n\n"
+			MessageBoxW(h, L"M480Tube 1.4\nSCH-M480용 유튜브 뷰어\n\n"
 			            L"유튜브가 바뀌어 재생이 안 되면 메뉴의 '유튜브 연결 설정 다시 받기'를 눌러 보세요.\n"
 			            L"문제가 계속되면 프로그램 폴더의 m480tube_log.txt 내용을 알려 주세요.", APPNAME, MB_OK);
 			return 0;

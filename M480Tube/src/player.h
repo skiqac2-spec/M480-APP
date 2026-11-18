@@ -22,6 +22,7 @@ void    player_drag(Player *p, int x, int y, int up); /* WM_MOUSEMOVE/LBUTTONUP 
 void    player_key(Player *p, int vk);
 void    player_tick(Player *p);                /* ~4x per second from UI timer */
 int     player_orientation(Player *p);
+void    player_selftest(char *out, int len);   /* decode embedded test clips */
 #ifndef _WIN32_WCE
 void    player_debug(Player *p, const char *what, long arg);
 #endif
