@@ -6,7 +6,7 @@
 #include <locale.h>
 int harness_mode(void); int harness_bphase(void); void harness_cheat(void); void harness_boss(void); void harness_magic(void); void harness_area(int); void harness_unique(void); void harness_gallery(int,int,int); void harness_bossk(int); void harness_anim(int,int); void harness_town(void (*)(const char *)); void harness_act(int,int); void harness_lvl(int);
 
-static u16 fb[GW_MAX * 480];
+static u16 fb[GWMAX * 480];
 static FILE *tlog;
 
 int plat_text_w(const wchar_t *s, int fl)
@@ -77,6 +77,23 @@ int main(int argc, char **argv)
     ticks(40);
     snap("title");
     if (getenv("TOWN")) { harness_town(snap); return 0; }
+    if (getenv("KEYTEST")) {
+        game_key(K_OK); ticks(10);
+        for (i = 0; i < 12; i++) { game_key(K_OK); ticks(3); }
+        snap("k0_explore");
+        game_key(K_SOFTR); ticks(2); snap("k1_menu_softR");
+        game_key(K_SOFTR); ticks(2); snap("k2_closed");
+        game_key(K_INV); ticks(2); snap("k3_inv_I");
+        game_key(K_CHAR); ticks(2); snap("k4_char_C");
+        game_key(K_SOFTL); ticks(2); snap("k5_back");
+        game_key(K_SOFTL); ticks(2); snap("k6_char_softL");
+        game_key(K_CHAR); game_key(K_MAP); ticks(2); snap("k7_map_M");
+        harness_boss(); ticks(40); snap("k8_battle");
+        game_key(K_CMD2); ticks(2); snap("k9_battle_S_magic");
+        game_key(K_SOFTL); ticks(2); snap("k10_cancel");
+        game_key(K_CMD1); ticks(60); snap("k11_attack_A");
+        return 0;
+    }
     if (getenv("EQ")) {
         extern void harness_equip(int, int, int); extern void harness_charscreen(void);
         static const int sets[6][3] = { { 0, 9, -1 }, { 2, 10, 15 }, { 4, 11, 17 }, { 23, 28, 32 }, { 24, 29, 17 }, { 26, 30, 33 } };

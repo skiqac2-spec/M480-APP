@@ -5,12 +5,16 @@
 
 typedef unsigned short u16;
 
-#define GW_MAX 320
+#define GWMAX 320
 extern int GW;            /* logical width: 240 (portrait screens) .. 320 (square screens) */
 extern int GH;            /* logical height (320..427) */
 extern u16 *FB;           /* RGB565 framebuffer GW*GH, top-down */
 
-enum { K_UP = 1, K_DOWN, K_LEFT, K_RIGHT, K_OK, K_BACK, K_MENU };
+enum { K_UP = 1, K_DOWN, K_LEFT, K_RIGHT, K_OK, K_BACK, K_MENU,
+       K_SOFTL, K_SOFTR,             /* soft keys above call / end: same as the two bottom buttons on screen */
+       K_INV, K_CHAR, K_MAP,         /* I, C, M */
+       K_BELT1, K_BELT2, K_BELT3, K_BELT4,          /* 1-4 or Q W E R: potion belt */
+       K_CMD1, K_CMD2, K_CMD3, K_CMD4, K_CMD5 };    /* battle: A attack, S magic, D item, F defend, G flee */
 
 void game_init(int h, u16 *fb, unsigned seed);
 void game_key(int k);

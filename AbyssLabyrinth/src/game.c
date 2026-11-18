@@ -1545,7 +1545,7 @@ static struct {
     struct { short x, y, vx, vy, t; } bl[32];
     int bgok;
 } B;
-static u16 bgbuf[GW_MAX * 480];
+static u16 bgbuf[GWMAX * 480];
 
 static void sprite_size(int spr, int *w, int *h)
 {
@@ -4143,7 +4143,7 @@ static u16 fire_col(int v)
     return rgb(255, 120 + (v - 24) * 10, (v - 24) * 12);
 }
 
-static u16 tbuf[GW_MAX * 480];
+static u16 tbuf[GWMAX * 480];
 static void render_title(void)
 {
     int y, x, ty = GH / 5;
@@ -4191,6 +4191,14 @@ static void render_dead(void)
 
 static void render_menu(void)
 {
+    {   /* key guide for the physical keyboard */
+        int y0 = PY - 42;
+        fill(0, y0, GW, 42, rgb(8, 6, 4));
+        hline(0, GW - 1, y0, rgb(90, 66, 30));
+        txt(GW / 2, y0 + 2, L"소프트키: 왼쪽 캐릭터 · 오른쪽 메뉴", C_GOLD, T_CENTER | T_SHADOW);
+        txt(GW / 2, y0 + 15, L"I 가방  C 캐릭터  M 지도  1~4(QWER) 물약", C_WHITE, T_CENTER | T_SHADOW);
+        txt(GW / 2, y0 + 28, L"전투: A공격 S마법 D도구 F방어 G도망", C_WHITE, T_CENTER | T_SHADOW);
+    }
     const wchar_t *it[5] = { L"모험 계속", snd_music_on ? L"음악: 켜짐" : L"음악: 꺼짐", snd_sfx_on ? L"효과음: 켜짐" : L"효과음: 꺼짐",
                              L"저장하고 종료", confirm ? L"정말 포기? (한번 더)" : L"포기하고 처음으로" };
     list_window(GW / 2 - 90, VY + 20, 180, it, 0, 5, sel, B_LIST, 22);
@@ -4499,9 +4507,51 @@ void game_tap(int x, int y)
     do_button(id);
 }
 
+/* physical shortcut keys: returns 1 if handled, otherwise k is turned into a basic key (or 0 = ignore) */
+static int hotkey(int *pk)
+{
+    int k = *pk, b = k >= K_BELT1 && k <= K_BELT4 ? k - K_BELT1 : -1, c = k >= K_CMD1 && k <= K_CMD5 ? k - K_CMD1 : -1;
+    if (mode == M_DEAD || mode == M_STORY) { *pk = K_OK; return 0; }
+    if (mode == M_EXPLORE) {
+        if (k == K_SOFTL || k == K_CHAR) { snd_play_v(SX_CLICK, 120); do_button(B_CHAR); }
+        else if (k == K_SOFTR) { snd_play_v(SX_CLICK, 120); do_button(B_MENU); }
+        else if (k == K_INV) { snd_play_v(SX_CLICK, 120); do_button(B_INV); }
+        else if (k == K_MAP) do_button(B_MAP);
+        else if (b >= 0) do_button(B_BELT + b);
+        return 1;
+    }
+    if (mode == M_BATTLE) {
+        if (k == K_SOFTL) { if (B.phase == BP_MAGIC || B.phase == BP_POTION || B.phase == BP_TARGET) do_button(B_CANCEL); }
+        else if (k == K_SOFTR) do_button(B_OKB);
+        else if (c >= 0) { if (B.phase == BP_CMD || B.phase == BP_MAGIC || B.phase == BP_POTION || B.phase == BP_TARGET) do_button(B_CMD + c); }
+        else if (b >= 0) { if (S.belt[b].kind) do_button(B_BELT + b); }
+        else return 1;
+        snd_play_v(SX_CLICK, 120);
+        return 1;
+    }
+    if (mode == M_INV) {
+        if (k == K_CHAR) { mode = M_CHAR; csel = 0; }
+        else if (k == K_INV || k == K_SOFTL || k == K_SOFTR) mode = M_EXPLORE;
+        else if (b >= 0) { use_belt(b); }
+        return 1;
+    }
+    if (mode == M_CHAR) {
+        if (k == K_INV) { mode = M_INV; invmsg[0] = 0; }
+        else if (k == K_CHAR || k == K_SOFTL || k == K_SOFTR) mode = M_EXPLORE;
+        return 1;
+    }
+    if (mode == M_TITLE) { if (k == K_SOFTR) *pk = K_OK; else return 1; return 0; }
+    if (mode == M_MENU) { if (k == K_SOFTL || k == K_SOFTR) { mode = M_EXPLORE; } return 1; }
+    /* trade / talk / warp / shop / prompt */
+    if (k == K_SOFTL) { *pk = K_BACK; return 0; }
+    if (k == K_SOFTR) { *pk = K_OK; return 0; }
+    return 1;
+}
+
 void game_key(int k)
 {
     dirty = 1;
+    if (k >= K_SOFTL && hotkey(&k)) return;
     if (mode != M_EXPLORE && mode != M_BATTLE) snd_play_v(SX_CLICK, 120);
     else if (mode == M_BATTLE && (k == K_OK || k == K_BACK)) snd_play_v(SX_CLICK, 120);
     if (mode == M_DEAD) { mode = M_TITLE; sel = 0; return; }

@@ -264,11 +264,57 @@ static int mapkey(WPARAM vk)
     case VK_LEFT: return K_LEFT;
     case VK_RIGHT: return K_RIGHT;
     case VK_RETURN: case VK_SPACE: return K_OK;
-    case VK_ESCAPE: case VK_BACK: case VK_F2: return K_BACK;
-    case VK_F1: case 'M': return K_MENU;
-    case '1': case '2': case '3': case '4': return 0;
+    case VK_BACK: return K_BACK;
+    case VK_ESCAPE: return K_MENU;
+    case VK_F1: return K_SOFTL;          /* VK_TSOFT1: left soft key (above call) */
+    case VK_F2: return K_SOFTR;          /* VK_TSOFT2: right soft key (above end) */
+    case VK_TAB: case 'M': return K_MAP;
+    case 'I': return K_INV;
+    case 'C': return K_CHAR;
+    case '1': case 'Q': return K_BELT1;
+    case '2': case 'W': return K_BELT2;
+    case '3': case 'E': return K_BELT3;
+    case '4': case 'R': return K_BELT4;
+    case 'A': return K_CMD1;
+    case 'S': return K_CMD2;
+    case 'D': return K_CMD3;
+    case 'F': return K_CMD4;
+    case 'G': return K_CMD5;
     }
     return 0;
+}
+
+/* keyboard helpers loaded at run time (not every device exports them) */
+typedef BOOL (WINAPI *PFN_ALLKEYS)(BOOL);
+typedef HANDLE (WINAPI *PFN_IMMASSOC)(HWND, HANDLE);
+typedef UINT (WINAPI *PFN_IMMGETVK)(HWND);
+static PFN_IMMGETVK pImmGetVirtualKey;
+static int hotkeys_on;
+static void keys_setup(HWND h)
+{
+    HMODULE m = LoadLibraryW(L"coredll.dll");
+    if (!m) m = LoadLibraryW(L"imm32.dll");
+    if (m) {
+        PFN_IMMASSOC a;
+#ifdef _WIN32_WCE
+        a = (PFN_IMMASSOC)GetProcAddressW(m, L"ImmAssociateContext");
+        pImmGetVirtualKey = (PFN_IMMGETVK)GetProcAddressW(m, L"ImmGetVirtualKey");
+#else
+        a = (PFN_IMMASSOC)GetProcAddress(m, "ImmAssociateContext");
+        pImmGetVirtualKey = (PFN_IMMGETVK)GetProcAddress(m, "ImmGetVirtualKey");
+#endif
+        if (a) a(h, NULL);              /* no Korean IME composition: letters arrive as plain keys */
+    }
+}
+/* soft keys: grab them while the game is in front so the shell does not use them */
+static void softkeys(HWND h, int on)
+{
+#ifdef _WIN32_WCE
+    if (on && !hotkeys_on) { RegisterHotKey(h, 0xB001, 0, VK_F1); RegisterHotKey(h, 0xB002, 0, VK_F2); hotkeys_on = 1; }
+    else if (!on && hotkeys_on) { UnregisterHotKey(h, 0xB001); UnregisterHotKey(h, 0xB002); hotkeys_on = 0; }
+#else
+    (void)h; (void)on;
+#endif
 }
 
 static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
@@ -277,7 +323,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         return 0;
     case WM_ACTIVATE:
-        if (LOWORD(wp) != WA_INACTIVE) { fullscreen(); audio_pause(0); } else audio_pause(1);
+        if (LOWORD(wp) != WA_INACTIVE) { fullscreen(); audio_pause(0); softkeys(h, 1); } else { audio_pause(1); softkeys(h, 0); }
         break;
     case WM_SIZE:
         calc_dst();
@@ -305,8 +351,17 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     }
+    case WM_HOTKEY:
+        if (wp == 0xB001 || wp == 0xB002) {
+            game_key(wp == 0xB001 ? K_SOFTL : K_SOFTR); redraw();
+            if (game_wants_quit()) DestroyWindow(h);
+            return 0;
+        }
+        break;
     case WM_KEYDOWN: {
-        int k = mapkey(wp);
+        int k;
+        if (wp == 0xE5 && pImmGetVirtualKey) wp = pImmGetVirtualKey(h);    /* VK_PROCESSKEY */
+        k = mapkey(wp);
         if (k) { game_key(k); redraw(); }
         if (game_wants_quit()) { DestroyWindow(h); }
         return 0;
@@ -320,6 +375,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         DestroyWindow(h);
         return 0;
     case WM_DESTROY:
+        softkeys(h, 0);
         KillTimer(h, 1);
         audio_stop();
         PostQuitMessage(0);
@@ -358,7 +414,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
 #ifdef _WIN32_WCE
     /* portrait (240x320, 480x640...): 240 wide; square (320x320 SCH-M480) or landscape: up to 320 wide */
     if (sw * 4 <= sh * 3) { GW = 240; logH = sh * GW / sw; if (logH < 320) logH = 320; if (logH > 427) logH = 427; }
-    else { logH = 320; GW = sw * 320 / sh; if (GW < 240) GW = 240; if (GW > GW_MAX) GW = GW_MAX; GW &= ~1; }
+    else { logH = 320; GW = sw * 320 / sh; if (GW < 240) GW = 240; if (GW > GWMAX) GW = GWMAX; GW &= ~1; }
     hwnd = CreateWindowW(CLS, L"심연의 미궁", WS_VISIBLE, 0, 0, sw, sh, NULL, NULL, hi, NULL);
 #else
     {
@@ -373,6 +429,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
 #endif
     if (!hwnd) { plog("CreateWindow failed"); return 1; }
     plog("window ok");
+    keys_setup(hwnd);
     fSmall = mkfont(12, 0);
     fBig = mkfont(22, 1);
     create_dib();
