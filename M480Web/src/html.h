@@ -82,6 +82,10 @@ typedef struct Doc {
 } Doc;
 
 Doc *html_parse(const char *bytes, int len, const char *url, const char *charset_hint, int is_text);
+/* site reader flags */
+#define HP_NOIMG 1   /* drop images completely */
+#define HP_NAMU  2   /* namu.wiki: hide site menus, edit/history links, its own (script) forms */
+Doc *html_parse_ex(const char *bytes, int len, const char *url, const char *charset_hint, int is_text, int flags);
 void doc_addref(Doc *d);
 void doc_release(Doc *d);
 UINT charset_to_cp(const char *cs);

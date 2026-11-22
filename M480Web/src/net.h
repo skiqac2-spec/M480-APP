@@ -15,6 +15,7 @@ typedef struct {
 	int   certerr;     /* BearSSL error code if certificate problem */
 	char  certhost[128];
 	char  tlsinfo[96];
+	DWORD date;        /* Date header (unix time), 0 if none */
 	void *sink;        /* FILE* the body was streamed into (NULL = in body) */
 	long  streamed;    /* bytes written to sink */
 } HttpResp;
@@ -36,6 +37,7 @@ const char *net_get_ua(void);
 void net_allow_insecure(const char *host);
 void net_cancel(NetCtl *c);
 void net_set_auth(const char *host, const char *token);
+long net_time_offset(void);
 
 /* method: "GET"/"POST"; body may be NULL. returns 1 if got an HTTP response */
 int  http_request(const char *url, const char *method, const char *body, int bodylen,

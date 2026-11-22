@@ -148,6 +148,7 @@ static Mark *g_vis; static int g_nvis;
 static Mark *g_sc; static int g_nsc;   /* home page shortcuts (editable) */
 
 static const char *g_sc_default[][2] = {
+	{ "https://namu.wiki/w/%EB%82%98%EB%AC%B4%EC%9C%84%ED%82%A4:%EB%8C%80%EB%AC%B8", "나무위키" },
 	{ "https://ko.m.wikipedia.org/", "위키백과" },
 	{ "https://m.naver.com/", "네이버" },
 	{ "https://m.daum.net/", "다음" },
@@ -385,11 +386,16 @@ static Doc *about_page(const char *url)
 		/* home */
 		buf_adds(&b,
 			"<title>M480Web</title>"
-			"<center><h2>M480Web</h2></center>"
-			"<form action=\"https://lite.duckduckgo.com/lite/\" method=\"get\">"
-			"<input type=hidden name=kl value=kr-kr>"
-			"<input type=text name=q size=18 placeholder=\"\xEA\xB2\x80\xEC\x83\x89\xEC\x96\xB4 \xEC\x9E\x85\xEB\xA0\xA5\"> <input type=submit value=\"\xEA\xB2\x80\xEC\x83\x89\"></form>"
-			"<p><small>\xEA\xB2\x80\xEC\x83\x89\xEC\x9D\x80 DuckDuckGo Lite\xEB\xA5\xBC \xEC\x82\xAC\xEC\x9A\xA9\xED\x95\xA9\xEB\x8B\x88\xEB\x8B\xA4. \xEC\xA3\xBC\xEC\x86\x8C\xEC\xB0\xBD\xEC\x97\x90 \xEB\x8B\xA8\xEC\x96\xB4\xEB\xA5\xBC \xEC\xB9\x98\xEC\x96\xB4\xEB\x8F\x84 \xEA\xB2\x80\xEC\x83\x89\xEB\x90\xA9\xEB\x8B\x88\xEB\x8B\xA4.</small></p>");
+			"<h2>나무위키</h2>"
+			"<form action=\"https://namu.wiki/Go\" method=\"get\">"
+			"<input type=text name=q size=13 placeholder=\"문서 이름 입력\"> <input type=submit value=\"검색\"></form>"
+			"<p><a href=\"https://namu.wiki/w/%EB%82%98%EB%AC%B4%EC%9C%84%ED%82%A4:%EB%8C%80%EB%AC%B8\"><b>나무위키 대문</b></a> · "
+			"<a href=\"https://namu.wiki/random\">아무 문서</a></p>"
+			"<h3>위키백과</h3>"
+			"<form action=\"https://ko.m.wikipedia.org/w/index.php\" method=\"get\">"
+			"<input type=hidden name=title value=\"특수:검색\"><input type=hidden name=go value=\"보기\">"
+			"<input type=text name=search size=13 placeholder=\"문서 이름 입력\"> <input type=submit value=\"검색\"></form>"
+			"<p><small>주소창에 단어만 쳐도 나무위키에서 찾습니다. 나무위키는 글자만 깔끔하게 보여 줍니다.</small></p>");
 		if (g_nbm) {
 			buf_adds(&b, "<h3>\xEC\xA6\x90\xEA\xB2\xA8\xEC\xB0\xBE\xEA\xB8\xB0</h3><ul>");
 			for (i = 0; i < g_nbm && i < 12; i++) { buf_adds(&b, "<li><a href=\""); h_esc(&b, g_bm[i].url); buf_adds(&b, "\">"); h_esc(&b, g_bm[i].title); buf_adds(&b, "</a>"); }
@@ -465,6 +471,42 @@ static int view_width(void)
 	return r.right - r.left;
 }
 
+static int is_namu(const char *url)
+{
+	Url u;
+	int r = 0;
+	if (url && url_parse(url, &u)) {
+		int n = (int)strlen(u.host);
+		r = !strcmp(u.host, "namu.wiki") || (n > 10 && !strcmp(u.host + n - 10, ".namu.wiki"));
+#ifdef M480_DEBUG
+		if (getenv("M480_NAMU_TEST") && strstr(u.path, "/namu/")) r = 1;
+#endif
+		url_free(&u);
+	}
+	return r;
+}
+
+/* search bar shown on top of every namu.wiki page (the site's own one needs JavaScript) */
+static void namu_toolbar(Buf *b, const char *url)
+{
+	const char *qs = strchr(url, '?');
+	buf_adds(b, "<form action=\"https://namu.wiki/Go\" data-m480=\"1\"><input type=text name=q size=13 placeholder=\"나무위키 검색\"> <input type=submit value=\"검색\"></form>");
+	if (strstr(url, "/Search?") && qs) {
+		char *q = query_param(qs + 1, "q");
+		if (q && *q) {
+			char *e = url_encode(q);
+			buf_adds(b, "<p><b>");
+			h_esc(b, q);
+			buf_adds(b, "</b> 문서를 바로 찾지 못했습니다.<br><a href=\"https://lite.duckduckgo.com/lite/?kl=kr-kr&q=site%3Anamu.wiki+");
+			buf_adds(b, e);
+			buf_adds(b, "\">비슷한 나무위키 문서 찾기</a></p>");
+			free(e);
+		}
+		free(q);
+	}
+	buf_adds(b, "<hr>");
+}
+
 static DWORD WINAPI load_thread(LPVOID p)
 {
 	Job *j = (Job *)p;
@@ -490,6 +532,14 @@ static DWORD WINAPI load_thread(LPVOID p)
 		const char *ct = j->resp.ctype;
 		if (is_html_type(ct) || (ct && !strncmp(ct, "text/", 5))) {
 			int is_text = ct && !is_html_type(ct);
+			if (!is_text && is_namu(j->resp.url)) {
+				Buf nb;
+				buf_init(&nb);
+				namu_toolbar(&nb, j->resp.url);
+				if (j->resp.body.p) buf_add(&nb, j->resp.body.p, j->resp.body.len);
+				j->doc = html_parse_ex(nb.p, nb.len, j->resp.url, "utf-8", 0, HP_NAMU | HP_NOIMG);
+				buf_free(&nb);
+			} else
 			j->doc = html_parse(j->resp.body.p ? j->resp.body.p : "", j->resp.body.len, j->resp.url, j->resp.charset, is_text);
 		} else if (ct && !strncmp(ct, "image/", 6)) {
 			Buf b;
@@ -1236,7 +1286,8 @@ static void navigate(const char *url0, const char *post, int postlen, const char
 			free(g_doc->url);
 			g_doc->url = xstrdup(url);
 			addr_set(url);
-			if (y >= 0) set_scroll(y);
+			if (mode == NAV_HIST && g_hpos >= 0) set_scroll(g_hist[g_hpos].scroll);
+			else if (y >= 0) set_scroll(y);
 			free(url);
 			toolbar_invalidate();
 			return;

@@ -18,6 +18,22 @@
 static char g_auth_host[128], g_auth_token[160];
 static char g_ua[256] = "Opera/9.80 (Windows Mobile; Opera Mini/7.1.32052/191.256; U; ko) Presto/2.12.423 Version/12.16";
 static CRITICAL_SECTION g_cs;
+/* correction for a wrong device clock (seconds), learned from a server's Date header */
+static volatile long g_time_ofs;
+static volatile int g_time_synced;
+static DWORD parse_http_date(const char *s);
+#ifndef BUILD_UNIX
+#define BUILD_UNIX 1763856000UL /* 2025-11-23 */
+#endif
+/* time used for certificate checks: device clock + learned correction, but never
+   earlier than the build date (a phone with a flat clock battery says 2008/2009) */
+static DWORD net_now(void)
+{
+	DWORD t = now_unix() + g_time_ofs;
+	if (!g_time_ofs && t < (DWORD)BUILD_UNIX) t = (DWORD)BUILD_UNIX;
+	return t;
+}
+long net_time_offset(void) { return g_time_ofs; }
 static int g_inited;
 
 /* ------------------------------------------------------------------ */
@@ -368,7 +384,7 @@ static int conn_open(Conn *c, const Url *u, NetCtl *ctl, HttpResp *resp)
 	if (strcmp(u->scheme, "https") == 0) {
 		unsigned char seed[32];
 		br_ssl_session_parameters sp;
-		DWORD t = now_unix();
+		DWORD t = net_now();
 		int resume;
 		c->tls = 1;
 		br_ssl_client_init_full(&c->sc, &c->xc, TAs, TAs_NUM);
@@ -487,7 +503,7 @@ static void ck_add(const char *domain, int hostonly, const char *path, int secur
 			break;
 		}
 	}
-	if (expires && expires < now_unix()) return; /* deletion */
+	if (expires && expires < net_now()) return; /* deletion */
 	if (g_nck >= 400) { ck_free(&g_ck[0]); memmove(g_ck, g_ck + 1, (g_nck - 1) * sizeof(Cookie)); g_nck--; }
 	g_ck = (Cookie *)realloc(g_ck, (g_nck + 1) * sizeof(Cookie));
 	g_ck[g_nck].domain = xstrdup(domain);
@@ -562,7 +578,7 @@ static void set_cookie(const Url *u, const char *hdr)
 			char *v = xstrndup(ae + 1, (int)(ve - ae - 1));
 			if (kl == 6 && strnieq(a, "domain", 6)) { free(domain); domain = xstrdup(v[0] == '.' ? v + 1 : v); { char *c; for (c = domain; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32; } }
 			else if (kl == 4 && strnieq(a, "path", 4)) { free(path); path = xstrdup(v); }
-			else if (kl == 7 && strnieq(a, "max-age", 7)) { long ma = atol(v); have_maxage = 1; expires = ma <= 0 ? 1 : now_unix() + (DWORD)ma; }
+			else if (kl == 7 && strnieq(a, "max-age", 7)) { long ma = atol(v); have_maxage = 1; expires = ma <= 0 ? 1 : net_now() + (DWORD)ma; }
 			else if (kl == 7 && strnieq(a, "expires", 7) && !have_maxage) { expires = parse_http_date(v); }
 			free(v);
 		} else if ((ve - a) >= 6 && strnieq(a, "secure", 6)) secure = 1;
@@ -593,7 +609,7 @@ static void cookie_header(const Url *u, Buf *out)
 {
 	int i, n = 0;
 	int https = strcmp(u->scheme, "https") == 0;
-	DWORD now = now_unix();
+	DWORD now = net_now();
 	EnterCriticalSection(&g_cs);
 	for (i = 0; i < g_nck; i++) {
 		Cookie *c = &g_ck[i];
@@ -868,6 +884,7 @@ static int do_one(const char *url, const char *method, const char *body, int bod
 		else if (strieq(line.p, "location")) { free(*location); *location = xstrdup(v); }
 		else if (strieq(line.p, "set-cookie")) set_cookie(&u, v);
 		else if (strieq(line.p, "refresh")) { free(r->refresh); r->refresh = xstrdup(v); }
+		else if (strieq(line.p, "date")) r->date = parse_http_date(v);
 		else if (strieq(line.p, "content-disposition")) { free(r->disposition); r->disposition = xstrdup(v); }
 	}
 	buf_free(&line);
@@ -891,6 +908,39 @@ done:
 	return ok;
 }
 
+static int is_time_err(int e) { return e == BR_ERR_X509_EXPIRED || e == BR_ERR_X509_TIME_UNKNOWN; }
+
+/* The phone's clock may be wrong (old battery etc.), which makes every certificate
+   look expired. Learn the real time from a plain-HTTP Date header and retry. */
+static int time_sync(NetCtl *ctl)
+{
+	static const char *urls[] = { "http://www.google.com/generate_204", "http://clients3.google.com/generate_204", "http://www.msftconnecttest.com/connecttest.txt" };
+	int i;
+	NetCtl c2;
+	if (g_time_synced) return 0;
+	g_time_synced = 1;
+	memset(&c2, 0, sizeof c2);
+	if (ctl) c2.abort = ctl->abort;
+	c2.sock = (unsigned int)INVALID_SOCKET;
+	ctl = &c2;
+	for (i = 0; i < 3; i++) {
+		HttpResp r;
+		char *loc = NULL;
+		memset(&r, 0, sizeof r);
+		if (do_one(urls[i], "GET", NULL, 0, NULL, NULL, &r, ctl, 65536, &loc) && r.date > 1600000000UL) {
+			long ofs = (long)(r.date - now_unix());
+			g_time_ofs = (ofs > 600 || ofs < -600) ? ofs : 0;
+			free(loc);
+			http_resp_free(&r);
+			return 1;
+		}
+		free(loc);
+		http_resp_free(&r);
+	}
+	g_time_synced = 0;
+	return 0;
+}
+
 int http_request(const char *url, const char *method, const char *body, int bodylen,
                  const char *ctype, const char *referer, HttpResp *r, NetCtl *ctl, int maxbytes)
 {
@@ -907,6 +957,12 @@ int http_request(const char *url, const char *method, const char *body, int body
 		HttpResp tmp;
 		memset(&tmp, 0, sizeof tmp);
 		ok = do_one(cur, meth, body, bodylen, ctype, ref, &tmp, ctl, maxbytes, &loc);
+		if (!ok && is_time_err(tmp.certerr) && time_sync(ctl)) {
+			free(loc); loc = NULL;
+			http_resp_free(&tmp);
+			memset(&tmp, 0, sizeof tmp);
+			ok = do_one(cur, meth, body, bodylen, ctype, ref, &tmp, ctl, maxbytes, &loc);
+		}
 		if (ok && loc && tmp.status >= 300 && tmp.status < 400 && tmp.status != 304) {
 			char *next = url_resolve(cur, loc);
 			free(loc);

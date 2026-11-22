@@ -256,10 +256,12 @@ char *url_fixup(const char *t)
 		{ char *r = url_resolve(NULL, b.p); buf_free(&b); return r; }
 	}
 	{
-		char *q = url_encode(t);
+		/* typed words go to namu.wiki (opens the document directly, or its search) */
+		char *q = url_encode(t), *c;
+		for (c = q; *c; c++) if (*c == '+') *c = ' ';
 		buf_init(&b);
-		buf_adds(&b, "https://lite.duckduckgo.com/lite/?kl=kr-kr&q=");
-		buf_adds(&b, q);
+		buf_adds(&b, "https://namu.wiki/Go?q=");
+		for (c = q; *c; c++) { if (*c == ' ') buf_adds(&b, "%20"); else buf_addc(&b, *c); }
 		free(q);
 		return buf_detach(&b);
 	}

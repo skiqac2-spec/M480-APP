@@ -156,7 +156,7 @@ static void finish_line(LS *s)
 		L->boxes[i].y = s->y + lh - L->boxes[i].h;
 		L->boxes[i].lb = s->y + lh;
 	}
-	s->y += lh + SC(1);
+	s->y += lh + lh / 5 + SC(1);
 	s->line_has = 0;
 	s->x = s->x0;
 }

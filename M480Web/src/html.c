@@ -196,6 +196,7 @@ typedef struct {
 	int pre_nl;
 	int in_cell, cell_content, cell_start_item;
 	int li_fresh;
+	int flags;
 	Attr at[40];
 	int nat;
 } B;
@@ -563,6 +564,37 @@ static void start_tag(B *b, int t, int selfclose)
 	if (!is_void(t) && style_hidden(b) && t != T_HTML && t != T_BODY) {
 		push(b, t, F_SKIP, 0);
 		return;
+	}
+	if (b->flags & HP_NOIMG) {
+		if (t == T_IMG || t == T_PICTURE || t == T_SOURCE) { if (t == T_PICTURE) push(b, t, F_SKIP, 0); return; }
+	}
+	if (b->flags & HP_NAMU) {
+		switch (t) {
+		case T_HEADER: case T_NAV: case T_FOOTER: case T_ASIDE: case T_BUTTON: case T_SELECT: case T_TEXTAREA: case T_DIALOG: case T_NOSCRIPT:
+			push(b, t, F_SKIP, 0);
+			return;
+		case T_FORM:
+			if (!attr(b, "data-m480")) { push(b, t, F_SKIP, 0); return; }
+			break;
+		case T_INPUT:
+			if (b->form < 0 || b->skip) return;
+			break;
+		case T_A: {
+			static const char *admin[] = { "/edit/", "/history/", "/discuss/", "/backlink/", "/acl/", "/move/", "/delete/", "/member/",
+				"/thread/", "/raw/", "/blame/", "/revert/", "/contribution/", "/RecentChanges", "/RecentDiscuss", "/Upload", "/License", NULL };
+			const WCHAR *hv = attr(b, "href");
+			int k;
+			if (hv) {
+				char *hu = w_to_utf8(hv, -1);
+				const char *path = hu;
+				if (!strncmp(path, "https://namu.wiki", 17)) path += 17;
+				for (k = 0; admin[k]; k++) if (!strncmp(path, admin[k], strlen(admin[k]))) break;
+				free(hu);
+				if (admin[k]) { push(b, t, F_SKIP, 0); return; }
+			}
+			break;
+		}
+		}
 	}
 
 	switch (t) {
@@ -1239,6 +1271,11 @@ static UINT sniff_meta(const char *s, int n)
 
 Doc *html_parse(const char *bytes, int len, const char *url, const char *charset_hint, int is_text)
 {
+	return html_parse_ex(bytes, len, url, charset_hint, is_text, 0);
+}
+
+Doc *html_parse_ex(const char *bytes, int len, const char *url, const char *charset_hint, int is_text, int flags)
+{
 	Doc *d = (Doc *)calloc(1, sizeof(Doc));
 	B *b = (B *)calloc(1, sizeof(B));
 	WCHAR *w = NULL;
@@ -1265,6 +1302,7 @@ Doc *html_parse(const char *bytes, int len, const char *url, const char *charset
 	}
 	d->cp = cp;
 	b->d = d;
+	b->flags = flags;
 	b->link = -1;
 	b->form = -1;
 	b->select_ctl = -1;
