@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.2"
+#define VERSION   "2.3"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -248,34 +248,82 @@ static void subs_load(void)
 	fclose(f);
 }
 
-/* Google Takeout "subscriptions.csv": Channel Id,Channel Url,Channel Title */
+/* Reads a subscription export and subscribes to every channel id in it.
+   Accepts Google Takeout CSV (any column order / name / language), UTF-8 or UTF-16.
+   returns channels newly added, -1 if unreadable; *found = channel ids seen */
+static int is_idch(int ch) { return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_'; }
+
 static int subs_import_file(const WCHAR *path, int *found)
 {
 	FILE *f = _wfopen(path, L"rb");
-	char line[600];
+	long n;
+	char *d, *text, *p;
 	int added = 0;
 	if (!f) return -1;
-	while (fgets(line, sizeof line, f)) {
-		char *p = line, *id, *title;
-		char *c1, *c2;
-		if (!strncmp(p, "\xEF\xBB\xBF", 3)) p += 3;
-		c1 = strchr(p, ',');
-		if (!c1) continue;
-		*c1 = 0;
-		id = p;
-		while (*id == ' ' || *id == '"') id++;
-		{ char *q = id + strlen(id); while (q > id && (q[-1] == '"' || q[-1] == ' ')) *--q = 0; }
-		c2 = strchr(c1 + 1, ',');
-		title = c2 ? c2 + 1 : (char *)"";
-		{
-			char *q = title + strlen(title);
-			while (q > title && (q[-1] == '\r' || q[-1] == '\n' || q[-1] == '"' || q[-1] == ' ')) *--q = 0;
-			while (*title == '"' || *title == ' ') title++;
-		}
-		if (!strncmp(id, "UC", 2) && strlen(id) >= 20 && strlen(id) < 32) (*found)++;
-		if (sub_add(id, title[0] ? title : id)) added++;
-	}
+	fseek(f, 0, SEEK_END);
+	n = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if (n <= 0 || n > 2 * 1024 * 1024) { fclose(f); return -1; }
+	d = (char *)malloc(n + 2);
+	if (!d) { fclose(f); return -1; }
+	n = (long)fread(d, 1, n, f);
 	fclose(f);
+	d[n] = d[n + 1] = 0;
+	if (n >= 2 && (unsigned char)d[0] == 0xFF && (unsigned char)d[1] == 0xFE) {
+		text = w_to_utf8((const WCHAR *)(d + 2), (n - 2) / 2);   /* UTF-16 LE */
+		free(d);
+		if (!text) return -1;
+	} else text = d;
+	p = text;
+	while (*p) {
+		char *e = p, *q;
+		while (*e && *e != '\n') e++;
+		/* channel id: UC + 22 id chars, not part of a longer word */
+		for (q = p; q + 24 <= e; q++) {
+			int k;
+			if (q[0] != 'U' || q[1] != 'C' || (q > p && is_idch((unsigned char)q[-1]))) continue;
+			for (k = 2; k < 24 && is_idch((unsigned char)q[k]); k++) {}
+			if (k == 24 && (q + 24 == e || !is_idch((unsigned char)q[24]))) break;
+		}
+		if (q + 24 <= e) {
+			char id[32], title[300];
+			memcpy(id, q, 24);
+			id[24] = 0;
+			title[0] = 0;
+			/* CSV: the title is the last column (quote aware) */
+			{
+				const char *a = p, *last = p, *lastend = e;
+				int inq = 0;
+				for (; a < e; a++) {
+					if (*a == '"') inq = !inq;
+					else if (*a == ',' && !inq) last = a + 1;
+				}
+				a = last;
+				lastend = e;
+				while (lastend > a && (lastend[-1] == '\r' || lastend[-1] == ' ')) lastend--;
+				while (a < lastend && *a == ' ') a++;
+				if (a < lastend && *a == '"' && lastend[-1] == '"' && lastend - a >= 2) { a++; lastend--; }
+				if (last != p && lastend - a > 0 && lastend - a < (int)sizeof title) {
+					int k, bad = 0;
+					for (k = 0; k + 4 <= lastend - a; k++) if (!strncmp(a + k, "http", 4)) bad = 1;
+					if (lastend - a == 24 && !strncmp(a, id, 24)) bad = 1;
+					if (!bad) {
+						/* "" inside quotes = one quote */
+						int o = 0;
+						for (k = 0; a + k < lastend && o < (int)sizeof title - 1; k++) {
+							if (a[k] == '"' && a + k + 1 < lastend && a[k + 1] == '"') k++;
+							title[o++] = a[k];
+						}
+						title[o] = 0;
+					}
+				}
+			}
+			(*found)++;
+			if (sub_add(id, title[0] ? title : id)) added++;
+		}
+		p = *e ? e + 1 : e;
+	}
+	free(text);
 	return added;
 }
 
@@ -1395,7 +1443,7 @@ static void import_subs(void)
 {
 	static const WCHAR *dirs[] = { NULL, L"\\My Documents\\", L"\\Storage Card\\", L"\\Storage Card\\My Documents\\", L"\\" };
 	int i, added = 0, found = 0, files = 0;
-	char s[200];
+	char s[700], checked[400] = "";
 	for (i = 0; i < 5; i++) {
 		WCHAR dir[MAX_PATH], pat[MAX_PATH], path[MAX_PATH];
 		WIN32_FIND_DATAW fd;
@@ -1403,22 +1451,40 @@ static void import_subs(void)
 		if (!dirs[i]) app_path(dir, L"");
 		else wcscpy(dir, dirs[i]);
 		wcscpy(pat, dir);
-		wcscat(pat, L"*.csv");
+		wcscat(pat, L"*");
 		fh = FindFirstFileW(pat, &fd);
 		if (fh == INVALID_HANDLE_VALUE) continue;
 		do {
 			int f = 0, r;
+			WCHAR *dot;
+			char *nm;
 			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+			/* only text exports: .csv / .txt / no extension, not our own files */
+			if (!_wcsnicmp(fd.cFileName, L"m480tube", 8)) continue;
+			dot = wcsrchr(fd.cFileName, L'.');
+			if (dot && dot[1] && _wcsicmp(dot, L".csv") && _wcsicmp(dot, L".txt")) continue;
+			if (fd.nFileSizeLow > 2 * 1024 * 1024) continue;
 			if (wcslen(dir) + wcslen(fd.cFileName) >= MAX_PATH) continue;
 			wcscpy(path, dir);
 			wcscat(path, fd.cFileName);
 			r = subs_import_file(path, &f);
+			nm = w_to_utf8(fd.cFileName, -1);
+			if (nm && strlen(checked) + strlen(nm) + 40 < sizeof checked) {
+				char one[80];
+				_snprintf(one, sizeof one, "\n%s (%luKB, 채널 %d)", nm, (unsigned long)(fd.nFileSizeLow / 1024), f);
+				one[sizeof one - 1] = 0;
+				strcat(checked, one);
+			}
+			free(nm);
+			tube_log("import: %s r=%d found=%d", "file", r, f);
 			if (r >= 0 && f > 0) { added += r; found += f; files++; }
 		} while (FindNextFileW(fh, &fd));
 		FindClose(fh);
 	}
 	if (!files) {
-		msgbox_u8("구독 목록 파일(.csv)을 찾지 못했습니다.\n\n구글 테이크아웃에서 받은 구독정보 .csv 파일을 M480Tube 폴더에 넣어 주세요.", MB_OK);
+		_snprintf(s, sizeof s, "구독 목록에서 채널을 찾지 못했습니다.\n확인한 파일:%s", checked[0] ? checked : "\n(없음)");
+		s[sizeof s - 1] = 0;
+		msgbox_u8(s, MB_OK);
 		return;
 	}
 	subs_save();
