@@ -6,6 +6,8 @@
 
 typedef struct {
 	char id[16];
+	char chid[32];   /* uploader channel id (UC...) if known */
+	long pub;        /* publish time (unix), 0 unknown - subscription feed */
 	char *title;     /* UTF-8 */
 	char *channel;
 	char *length;    /* "12:34" or NULL */
@@ -52,6 +54,12 @@ int  yt_config_update(NetCtl *ctl);   /* download latest config; 1 = updated */
 
 int  yt_search(const char *query, const char *cont, YtList *out, NetCtl *ctl);
 void yt_list_free(YtList *l);
+
+/* channel "Videos" tab (cont = NULL for the first page); *name gets the channel title */
+int  yt_channel(const char *chid, const char *cont, YtList *out, char **name, NetCtl *ctl);
+/* latest ~15 uploads of a channel from its public RSS feed (with publish times) */
+int  yt_rss(const char *chid, YtList *out, char **name, NetCtl *ctl);
+int  yt_parse_channel(const char *body, int len, YtList *out, char **name);
 
 /* quality: 0 = 240p, 1 = 144p, 2 = 360p */
 int  yt_streams(const char *id, int quality, YtStreams *out, NetCtl *ctl);

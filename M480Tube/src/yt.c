@@ -32,6 +32,7 @@ static int g_nplayer;
 static int g_vpref[3][16], g_nvpref[3];
 static int g_apref[16], g_napref;
 static char g_hl[8], g_gl[8];
+static char g_channel_params[80] = "EgZ2aWRlb3PyBgQKAjoA";
 static CRITICAL_SECTION g_ycs;
 static int g_ycs_init;
 YtTune g_tune;
@@ -153,6 +154,7 @@ static int apply_config(const char *text)
 			const char *k = line, *v = eq + 1;
 			if ((sec == S_SEARCH || sec == S_PLAYER) && cur) client_key(cur, k, v);
 			else if (!strcmp(k, "hl")) CPY(g_hl, v);
+			else if (!strcmp(k, "channel_params")) CPY(g_channel_params, v);
 			else if (!strcmp(k, "gl")) CPY(g_gl, v);
 			else if (!strcmp(k, "video240")) parse_ints(v, g_vpref[0], &g_nvpref[0], 16);
 			else if (!strcmp(k, "video144")) parse_ints(v, g_vpref[1], &g_nvpref[1], 16);
@@ -384,6 +386,10 @@ static void on_video_renderer(JNode *v, void *ctx)
 	if (!t) t = jget(v, "longBylineText");
 	if (!t) t = jget(v, "shortBylineText");
 	it->channel = runs_text(t);
+	{
+		const char *b = jpstr(t, "runs.0.navigationEndpoint.browseEndpoint.browseId");
+		if (b && strlen(b) < sizeof it->chid) strcpy(it->chid, b);
+	}
 	it->length = runs_text(jget(v, "lengthText"));
 	if (!it->length) {
 		const char *s = jpstr(v, "thumbnailOverlays.0.thumbnailOverlayTimeStatusRenderer.text.simpleText");
@@ -425,8 +431,26 @@ static void on_lockup(JNode *v, void *ctx)
 	it->title = runs_text(jget(md, "title"));
 	if (!it->title) it->title = xstrdup("(제목 없음)");
 	{
+		char *b = NULL;
+		jfind(md, "browseId", first_text, &b);
+		if (b && !strncmp(b, "UC", 2) && strlen(b) < sizeof it->chid) strcpy(it->chid, b);
+		free(b);
+	}
+	{
 		JNode *rows = jpath(md, "metadata.contentMetadataViewModel.metadataRows");
 		JNode *r;
+		int nrows = 0;
+		for (r = rows ? rows->child : NULL; r; r = r->next) nrows++;
+		if (nrows == 1) {
+			/* channel pages: the only row is "views · date" */
+			Buf b;
+			MetaCtx m;
+			buf_init(&b);
+			m.b = &b;
+			jfind(rows->child, "text", collect_content, &m);
+			if (b.len) it->meta = buf_detach(&b); else buf_free(&b);
+			rows = NULL;
+		}
 		for (r = rows ? rows->child : NULL; r; r = r->next) {
 			Buf b;
 			MetaCtx m;
@@ -554,6 +578,160 @@ void yt_list_free(YtList *l)
 	free(l->items);
 	free(l->cont);
 	memset(l, 0, sizeof *l);
+}
+
+/* ------------------------------------------------------------------ */
+/* channels                                                            */
+/* ------------------------------------------------------------------ */
+int yt_parse_channel(const char *body, int len, YtList *out, char **name)
+{
+	JDoc *d = json_parse(body, len);
+	const char *t;
+	if (!d) { strcpy(out->err, "채널 정보를 해석할 수 없음"); return 0; }
+	if (name && !*name) {
+		t = jpstr(json_root(d), "metadata.channelMetadataRenderer.title");
+		if (t) *name = xstrdup(t);
+	}
+	free(out->cont);
+	out->cont = NULL;
+	jfind(json_root(d), "videoRenderer", on_video_renderer, out);
+	jfind(json_root(d), "gridVideoRenderer", on_video_renderer, out);
+	jfind(json_root(d), "lockupViewModel", on_lockup, out);
+	jfind(json_root(d), "continuationCommand", on_cont, out);
+	json_free(d);
+	return 1;
+}
+
+int yt_channel(const char *chid, const char *cont, YtList *out, char **name, NetCtl *ctl)
+{
+	Client c;
+	Buf body;
+	HttpResp r;
+	char url[200];
+	int ok, n0 = out->n;
+	EnterCriticalSection(&g_ycs);
+	c = g_search;
+	LeaveCriticalSection(&g_ycs);
+	out->err[0] = 0;
+	{
+		/* same host as the search endpoint */
+		const char *h = strstr(c.url, "/youtubei/");
+		int hl = h ? (int)(h - c.url) : 0;
+		if (!hl) strcpy(url, "https://www.youtube.com");
+		else { memcpy(url, c.url, hl); url[hl] = 0; }
+		strcat(url, "/youtubei/v1/browse?prettyPrint=false");
+	}
+	buf_init(&body);
+	client_ctx(&body, &c, 0);
+	if (cont) { buf_adds(&body, ",\"continuation\":"); json_esc(&body, cont); }
+	else {
+		buf_adds(&body, ",\"browseId\":");
+		json_esc(&body, chid);
+		buf_addf(&body, ",\"params\":\"%s\"", g_channel_params);
+	}
+	buf_adds(&body, "}");
+	ok = api_post(&c, url, body.p, body.len, &r, ctl, out->err, sizeof out->err);
+	buf_free(&body);
+	if (!ok) { http_resp_free(&r); return 0; }
+	ok = yt_parse_channel(r.body.p, r.body.len, out, name);
+	http_resp_free(&r);
+	if (ok && out->n == n0 && !cont) { strcpy(out->err, "이 채널에는 영상이 없습니다"); return 0; }
+	return ok;
+}
+
+/* -------- RSS -------- */
+static char *xml_text(const char *s, const char *e, const char *tag, const char **after)
+{
+	char open[64], close[64];
+	const char *a, *b;
+	Buf o;
+	_snprintf(open, sizeof open, "<%s>", tag);
+	_snprintf(close, sizeof close, "</%s>", tag);
+	a = strstr(s, open);
+	if (!a || a >= e) return NULL;
+	a += strlen(open);
+	b = strstr(a, close);
+	if (!b || b > e) return NULL;
+	if (after) *after = b + strlen(close);
+	buf_init(&o);
+	while (a < b) {
+		if (*a == '&') {
+			if (!strncmp(a, "&amp;", 5)) { buf_addc(&o, '&'); a += 5; continue; }
+			if (!strncmp(a, "&lt;", 4)) { buf_addc(&o, '<'); a += 4; continue; }
+			if (!strncmp(a, "&gt;", 4)) { buf_addc(&o, '>'); a += 4; continue; }
+			if (!strncmp(a, "&quot;", 6)) { buf_addc(&o, '"'); a += 6; continue; }
+			if (!strncmp(a, "&#39;", 5)) { buf_addc(&o, '\''); a += 5; continue; }
+		}
+		buf_addc(&o, *a++);
+	}
+	return buf_detach(&o);
+}
+
+/* "2026-11-17T21:58:44+00:00" -> unix time */
+static long iso_time(const char *s)
+{
+	int y, mo, d, h = 0, mi = 0, se = 0;
+	long days;
+	static const int cum[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+	if (!s || sscanf(s, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) < 3 || mo < 1 || mo > 12) return 0;
+	days = (y - 1970) * 365L + (y - 1969) / 4 + cum[mo - 1] + d - 1;
+	if (mo > 2 && (y % 4) == 0) days++;
+	return days * 86400 + h * 3600 + mi * 60 + se;
+}
+
+int yt_rss(const char *chid, YtList *out, char **name, NetCtl *ctl)
+{
+	char url[160];
+	HttpResp r;
+	const char *p, *end;
+	int n0 = out->n;
+	_snprintf(url, sizeof url, "https://www.youtube.com/feeds/videos.xml?channel_id=%s", chid);
+	out->err[0] = 0;
+	if (!http_request(url, "GET", NULL, 0, NULL, NULL, &r, ctl, 1024 * 1024) || r.status != 200) {
+		_snprintf(out->err, sizeof out->err, "피드 오류 (%s)", r.err[0] ? r.err : "HTTP");
+		http_resp_free(&r);
+		return 0;
+	}
+	buf_addc(&r.body, 0);
+	p = r.body.p;
+	end = p + strlen(p);
+	if (name && !*name) {
+		const char *e1 = strstr(p, "<entry>");
+		*name = xml_text(p, e1 ? e1 : end, "title", NULL);
+	}
+	while ((p = strstr(p, "<entry>")) != NULL) {
+		const char *e = strstr(p, "</entry>");
+		char *vid, *title, *pub, *views = NULL;
+		YtItem *it;
+		if (!e) break;
+		vid = xml_text(p, e, "yt:videoId", NULL);
+		title = xml_text(p, e, "title", NULL);
+		pub = xml_text(p, e, "published", NULL);
+		{
+			const char *v = strstr(p, "views=\"");
+			if (v && v < e) { long n = atol(v + 7); views = (char *)malloc(40); sprintf(views, "\xEC\xA1\xB0\xED\x9A\x8C\xEC\x88\x98 %ld\xED\x9A\x8C", n); }
+		}
+		it = vid ? add_item(out, vid) : NULL;
+		if (it) {
+			it->title = title ? title : xstrdup("(제목 없음)");
+			title = NULL;
+			strncpy(it->chid, chid, sizeof it->chid - 1);
+			if (name && *name) it->channel = xstrdup(*name);
+			it->pub = iso_time(pub);
+			if (pub && strlen(pub) >= 10) {
+				char d[40];
+				_snprintf(d, sizeof d, "%.10s", pub);
+				d[sizeof d - 1] = 0;
+				it->meta = views ? join_meta(views, xstrdup(d)) : xstrdup(d);
+				views = NULL;
+			}
+		}
+		free(vid); free(title); free(pub); free(views);
+		p = e;
+	}
+	http_resp_free(&r);
+	if (out->n == n0) { strcpy(out->err, "피드에 영상이 없음"); return 0; }
+	return 1;
 }
 
 /* ------------------------------------------------------------------ */
