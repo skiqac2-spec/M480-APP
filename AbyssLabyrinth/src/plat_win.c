@@ -289,7 +289,8 @@ typedef BOOL (WINAPI *PFN_ALLKEYS)(BOOL);
 typedef HANDLE (WINAPI *PFN_IMMASSOC)(HWND, HANDLE);
 typedef UINT (WINAPI *PFN_IMMGETVK)(HWND);
 static PFN_IMMGETVK pImmGetVirtualKey;
-static int hotkeys_on;
+static PFN_ALLKEYS pAllKeys;
+static int hotkeys_on, allkeys_on;
 static void keys_setup(HWND h)
 {
     HMODULE m = LoadLibraryW(L"coredll.dll");
@@ -304,14 +305,26 @@ static void keys_setup(HWND h)
         pImmGetVirtualKey = (PFN_IMMGETVK)GetProcAddress(m, "ImmGetVirtualKey");
 #endif
         if (a) a(h, NULL);              /* no Korean IME composition: letters arrive as plain keys */
+#ifdef _WIN32_WCE
+        pAllKeys = (PFN_ALLKEYS)GetProcAddressW(m, L"AllKeys");
+#endif
     }
+    plog(pAllKeys ? "AllKeys found" : "AllKeys missing");
 }
 /* soft keys: grab them while the game is in front so the shell does not use them */
 static void softkeys(HWND h, int on)
 {
 #ifdef _WIN32_WCE
-    if (on && !hotkeys_on) { RegisterHotKey(h, 0xB001, 0, VK_F1); RegisterHotKey(h, 0xB002, 0, VK_F2); hotkeys_on = 1; }
-    else if (!on && hotkeys_on) { UnregisterHotKey(h, 0xB001); UnregisterHotKey(h, 0xB002); hotkeys_on = 0; }
+    /* AllKeys(TRUE): the shell stops eating the soft keys (and call/end) while the game is in front;
+       they arrive as VK_F1..VK_F4. Turned off again whenever the game loses focus. */
+    if (pAllKeys && on != allkeys_on) { pAllKeys(on ? TRUE : FALSE); allkeys_on = on; }
+    if (!pAllKeys) {
+        if (on && !hotkeys_on) {
+            BOOL a = RegisterHotKey(h, 0xB001, MOD_KEYUP, VK_F1), b = RegisterHotKey(h, 0xB002, MOD_KEYUP, VK_F2);
+            plog(a && b ? "softkey hotkeys ok" : "softkey hotkeys FAILED");
+            hotkeys_on = 1;
+        } else if (!on && hotkeys_on) { UnregisterHotKey(h, 0xB001); UnregisterHotKey(h, 0xB002); hotkeys_on = 0; }
+    }
 #else
     (void)h; (void)on;
 #endif
@@ -358,9 +371,23 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         break;
+    case WM_KEYUP:
+        return 0;
     case WM_KEYDOWN: {
         int k;
+        static int nlog;
         if (wp == 0xE5 && pImmGetVirtualKey) wp = pImmGetVirtualKey(h);    /* VK_PROCESSKEY */
+        if (nlog < 40) {                 /* key diagnostics in abyss_log.txt */
+            char b[40]; static const char hx[] = "0123456789ABCDEF";
+            strcpy(b, "key 0x"); b[6] = hx[(wp >> 4) & 15]; b[7] = hx[wp & 15]; b[8] = 0;
+            plog(b); nlog++;
+        }
+#ifdef _WIN32_WCE
+        if (wp == VK_F4) {               /* end key: save and leave */
+            game_suspend(); softkeys(h, 0); DestroyWindow(h); return 0;
+        }
+        if (wp == VK_F3) return 0;       /* call key: ignore */
+#endif
         k = mapkey(wp);
         if (k) { game_key(k); redraw(); }
         if (game_wants_quit()) { DestroyWindow(h); }
