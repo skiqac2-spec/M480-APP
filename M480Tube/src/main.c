@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.3"
+#define VERSION   "2.4"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -1439,56 +1439,71 @@ static void start_config_update(int verbose)
 
 /* imports every .csv in the usual folders that contains channel ids
    (the Takeout file may be named subscriptions.csv, 구독정보.csv, ...) */
+typedef struct { int added, found, files, scanned; char checked[400]; } ImportScan;
+
+/* walks the file system (not \\Windows) for *.csv with channel ids, depth-limited */
+static void import_scan_dir(const WCHAR *dir, int depth, ImportScan *st)
+{
+	WCHAR pat[MAX_PATH];
+	WIN32_FIND_DATAW fd;
+	HANDLE fh;
+	if (depth > 4 || st->scanned > 3000 || wcslen(dir) + 3 >= MAX_PATH) return;
+	wcscpy(pat, dir);
+	wcscat(pat, L"*");
+	fh = FindFirstFileW(pat, &fd);
+	if (fh == INVALID_HANDLE_VALUE) return;
+	do {
+		WCHAR path[MAX_PATH];
+		WCHAR *dot;
+		st->scanned++;
+		if (wcslen(dir) + wcslen(fd.cFileName) + 2 >= MAX_PATH) continue;
+		wcscpy(path, dir);
+		wcscat(path, fd.cFileName);
+		if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+			if (depth == 0 && !_wcsicmp(fd.cFileName, L"Windows")) continue;
+			if (fd.cFileName[0] == L'.') continue;
+			wcscat(path, L"\\");
+			import_scan_dir(path, depth + 1, st);
+			continue;
+		}
+		dot = wcsrchr(fd.cFileName, L'.');
+		if (!dot || _wcsicmp(dot, L".csv")) continue;
+		if (fd.nFileSizeLow > 2 * 1024 * 1024) continue;
+		{
+			int f = 0, r = subs_import_file(path, &f);
+			char *nm = w_to_utf8(path, -1);
+			if (nm && strlen(st->checked) + strlen(nm) + 30 < sizeof st->checked) {
+				char one[300];
+				_snprintf(one, sizeof one, "\n%s (채널 %d)", nm, f);
+				one[sizeof one - 1] = 0;
+				strcat(st->checked, one);
+			}
+			tube_log("import: %s r=%d found=%d", nm ? nm : "?", r, f);
+			free(nm);
+			if (r >= 0 && f > 0) { st->added += r; st->found += f; st->files++; }
+		}
+	} while (FindNextFileW(fh, &fd));
+	FindClose(fh);
+}
+
 static void import_subs(void)
 {
-	static const WCHAR *dirs[] = { NULL, L"\\My Documents\\", L"\\Storage Card\\", L"\\Storage Card\\My Documents\\", L"\\" };
-	int i, added = 0, found = 0, files = 0;
-	char s[700], checked[400] = "";
-	for (i = 0; i < 5; i++) {
-		WCHAR dir[MAX_PATH], pat[MAX_PATH], path[MAX_PATH];
-		WIN32_FIND_DATAW fd;
-		HANDLE fh;
-		if (!dirs[i]) app_path(dir, L"");
-		else wcscpy(dir, dirs[i]);
-		wcscpy(pat, dir);
-		wcscat(pat, L"*");
-		fh = FindFirstFileW(pat, &fd);
-		if (fh == INVALID_HANDLE_VALUE) continue;
-		do {
-			int f = 0, r;
-			WCHAR *dot;
-			char *nm;
-			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-			/* only text exports: .csv / .txt / no extension, not our own files */
-			if (!_wcsnicmp(fd.cFileName, L"m480tube", 8)) continue;
-			dot = wcsrchr(fd.cFileName, L'.');
-			if (dot && dot[1] && _wcsicmp(dot, L".csv") && _wcsicmp(dot, L".txt")) continue;
-			if (fd.nFileSizeLow > 2 * 1024 * 1024) continue;
-			if (wcslen(dir) + wcslen(fd.cFileName) >= MAX_PATH) continue;
-			wcscpy(path, dir);
-			wcscat(path, fd.cFileName);
-			r = subs_import_file(path, &f);
-			nm = w_to_utf8(fd.cFileName, -1);
-			if (nm && strlen(checked) + strlen(nm) + 40 < sizeof checked) {
-				char one[80];
-				_snprintf(one, sizeof one, "\n%s (%luKB, 채널 %d)", nm, (unsigned long)(fd.nFileSizeLow / 1024), f);
-				one[sizeof one - 1] = 0;
-				strcat(checked, one);
-			}
-			free(nm);
-			tube_log("import: %s r=%d found=%d", "file", r, f);
-			if (r >= 0 && f > 0) { added += r; found += f; files++; }
-		} while (FindNextFileW(fh, &fd));
-		FindClose(fh);
-	}
-	if (!files) {
-		_snprintf(s, sizeof s, "구독 목록에서 채널을 찾지 못했습니다.\n확인한 파일:%s", checked[0] ? checked : "\n(없음)");
+	ImportScan st;
+	char s[700];
+	HCURSOR old = SetCursor(LoadCursor(NULL, IDC_WAIT));
+	memset(&st, 0, sizeof st);
+	status_set("구독 목록 파일을 찾는 중...");
+	import_scan_dir(L"\\", 0, &st);
+	SetCursor(old);
+	if (!st.files) {
+		_snprintf(s, sizeof s, "구독 목록에서 채널을 찾지 못했습니다.\n찾은 .csv 파일:%s", st.checked[0] ? st.checked : "\n(없음)");
 		s[sizeof s - 1] = 0;
 		msgbox_u8(s, MB_OK);
+		status_set("");
 		return;
 	}
 	subs_save();
-	if (added) _snprintf(s, sizeof s, "채널 %d개를 새로 구독했습니다.\n(전체 구독 %d개)", added, g_nsubs);
+	if (st.added) _snprintf(s, sizeof s, "채널 %d개를 새로 구독했습니다.\n(전체 구독 %d개)", st.added, g_nsubs);
 	else _snprintf(s, sizeof s, "이미 모두 구독 중입니다.\n(전체 구독 %d개)", g_nsubs);
 	msgbox_u8(s, MB_OK);
 	g_subs_loaded_once = 0;
