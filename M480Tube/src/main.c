@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.0"
+#define VERSION   "2.1"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -46,7 +46,8 @@ unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th)
 enum {
 	M_Q240 = 1000, M_Q144, M_Q360, M_ORI_P, M_ORI_L, M_STATS, M_LIST, M_GRID, M_DARK,
 	M_IMPORT, M_UPDATE, M_SELFTEST, M_ABOUT, M_EXIT,
-	C_PLAY = 1100, C_CHANNEL, C_SUB, C_UNSUB
+	M_CLEARHIST,
+	C_PLAY = 1100, C_CHANNEL, C_SUB, C_UNSUB, C_DELHIST
 };
 
 /* ---------------- theme ---------------- */
@@ -67,7 +68,7 @@ static const Theme *T = &g_light;
 static HBRUSH g_editbr;
 
 /* ---------------- views ---------------- */
-enum { V_SEARCH, V_SUBS, V_CHANNEL };
+enum { V_SEARCH, V_SUBS, V_CHANNEL, V_HIST };
 typedef struct {
 	int kind, uid;
 	YtList list;
@@ -79,10 +80,10 @@ typedef struct {
 	char msg[300];         /* shown when the list is empty */
 } View;
 
-static View g_vsearch, g_vsubs;
+static View g_vsearch, g_vsubs, g_vhist;
 static View *g_chan[8];
 static int g_nchan;
-static int g_tab;          /* 0 = search, 1 = subscriptions */
+static int g_tab;          /* 0 = search, 1 = subscriptions, 2 = watch history */
 static int g_next_uid = 1;
 
 /* ---------------- state ---------------- */
@@ -136,7 +137,7 @@ static volatile int g_opening;
 static View *cur(void)
 {
 	if (g_nchan) return g_chan[g_nchan - 1];
-	return g_tab ? &g_vsubs : &g_vsearch;
+	return g_tab == 1 ? &g_vsubs : g_tab == 2 ? &g_vhist : &g_vsearch;
 }
 
 static View *view_by_uid(int uid)
@@ -144,6 +145,7 @@ static View *view_by_uid(int uid)
 	int i;
 	if (g_vsearch.uid == uid) return &g_vsearch;
 	if (g_vsubs.uid == uid) return &g_vsubs;
+	if (g_vhist.uid == uid) return &g_vhist;
 	for (i = 0; i < g_nchan; i++) if (g_chan[i]->uid == uid) return g_chan[i];
 	return NULL;
 }
@@ -274,6 +276,117 @@ static int subs_import_file(const WCHAR *path)
 	}
 	fclose(f);
 	return added;
+}
+
+/* ---------------- watch history ---------------- */
+#define HIST_MAX 200
+static void hist_field(FILE *f, const char *s)
+{
+	/* tabs / newlines would break the line format */
+	for (; s && *s; s++) fputc((*s == '\t' || *s == '\r' || *s == '\n') ? ' ' : *s, f);
+	fputc('\t', f);
+}
+
+static void hist_save(void)
+{
+	WCHAR p[MAX_PATH];
+	FILE *f;
+	int i;
+	app_path(p, L"m480tube_history.txt");
+	f = _wfopen(p, L"wb");
+	if (!f) return;
+	for (i = 0; i < g_vhist.list.n; i++) {
+		YtItem *it = &g_vhist.list.items[i];
+		hist_field(f, it->id);
+		hist_field(f, it->chid);
+		hist_field(f, it->title);
+		hist_field(f, it->channel);
+		hist_field(f, it->length);
+		hist_field(f, it->meta);
+		fputs("\r\n", f);
+	}
+	fclose(f);
+}
+
+static void hist_load(void)
+{
+	WCHAR p[MAX_PATH];
+	FILE *f;
+	char line[1200];
+	app_path(p, L"m480tube_history.txt");
+	f = _wfopen(p, L"rb");
+	if (!f) return;
+	while (fgets(line, sizeof line, f) && g_vhist.list.n < HIST_MAX) {
+		char *fld[6], *s = line;
+		int n = 0;
+		YtItem *it;
+		while (n < 6) {
+			char *t = strchr(s, '\t');
+			if (!t) break;
+			*t = 0;
+			fld[n++] = s;
+			s = t + 1;
+		}
+		if (n < 3 || !fld[0][0] || strlen(fld[0]) > 15) continue;
+		g_vhist.list.items = (YtItem *)realloc(g_vhist.list.items, (g_vhist.list.n + 1) * sizeof(YtItem));
+		it = &g_vhist.list.items[g_vhist.list.n++];
+		memset(it, 0, sizeof *it);
+		strcpy(it->id, fld[0]);
+		strncpy(it->chid, fld[1], sizeof it->chid - 1);
+		it->title = xstrdup(fld[2]);
+		if (n > 3 && fld[3][0]) it->channel = xstrdup(fld[3]);
+		if (n > 4 && fld[4][0]) it->length = xstrdup(fld[4]);
+		if (n > 5 && fld[5][0]) it->meta = xstrdup(fld[5]);
+	}
+	fclose(f);
+}
+
+/* put a watched video at the top of the history (copy of the list item) */
+static void hist_add(const YtItem *src)
+{
+	YtList *l = &g_vhist.list;
+	YtItem it;
+	int i;
+	memset(&it, 0, sizeof it);
+	strcpy(it.id, src->id);
+	strcpy(it.chid, src->chid);
+	it.title = xstrdup(src->title);
+	it.channel = xstrdup(src->channel);
+	it.length = xstrdup(src->length);
+	it.meta = xstrdup(src->meta);
+	EnterCriticalSection(&g_lcs);
+	for (i = 0; i < l->n; i++) {
+		if (!strcmp(l->items[i].id, it.id)) {
+			free(l->items[i].title); free(l->items[i].channel); free(l->items[i].length); free(l->items[i].meta);
+			memmove(&l->items[i], &l->items[i + 1], (l->n - i - 1) * sizeof(YtItem));
+			l->n--;
+			break;
+		}
+	}
+	if (l->n >= HIST_MAX) {
+		YtItem *o = &l->items[l->n - 1];
+		free(o->title); free(o->channel); free(o->length); free(o->meta);
+		l->n--;
+	}
+	l->items = (YtItem *)realloc(l->items, (l->n + 1) * sizeof(YtItem));
+	memmove(&l->items[1], &l->items[0], l->n * sizeof(YtItem));
+	l->items[0] = it;
+	l->n++;
+	LeaveCriticalSection(&g_lcs);
+	hist_save();
+}
+
+static void hist_remove(int idx)
+{
+	YtList *l = &g_vhist.list;
+	EnterCriticalSection(&g_lcs);
+	if (idx >= 0 && idx < l->n) {
+		free(l->items[idx].title); free(l->items[idx].channel); free(l->items[idx].length); free(l->items[idx].meta);
+		memmove(&l->items[idx], &l->items[idx + 1], (l->n - idx - 1) * sizeof(YtItem));
+		l->n--;
+	}
+	LeaveCriticalSection(&g_lcs);
+	hist_save();
 }
 
 /* ---------------- helpers ---------------- */
@@ -813,6 +926,11 @@ static void open_video(int idx)
 	j = (StreamJob *)calloc(1, sizeof(StreamJob));
 	strcpy(j->id, v->list.items[idx].id);
 	j->quality = g_quality;
+	{
+		/* copy first: adding may reorder the list we are reading from */
+		YtItem copy = v->list.items[idx];
+		hist_add(&copy);
+	}
 	g_opening = 1;
 	status_set("재생 정보를 가져오는 중...");
 	th = CreateThread(NULL, 0x20000, streams_thread, j, THREAD_FLAGS, NULL);
@@ -1014,6 +1132,7 @@ static void paint_list(HDC dc, int w, int h)
 		if (v->busy) m = v->kind == V_SUBS ? "구독 피드를 불러오는 중..." : "불러오는 중...";
 		else if (v->msg[0]) m = v->msg;
 		else if (v->kind == V_SUBS) m = "구독 탭입니다. 잠시 후 구독 채널의 새 영상이 나옵니다.";
+		else if (v->kind == V_HIST) m = "아직 본 영상이 없습니다.\n\n[검색] 탭에서 영상을 찾아 보면\n여기에 최근 본 순서대로 쌓입니다.";
 		else m = "위 칸에 검색어를 입력하고\n'검색'을 누르세요.\n\n영상을 누르면 재생되고,\n채널 이름을 누르면 채널로 갑니다.\n\n목록/격자, 다크 모드는\n오른쪽 위 메뉴에 있습니다.";
 		text_u8(g_bbdc, m, &r, DT_CENTER | DT_WORDBREAK);
 	} else if (g_grid) {
@@ -1085,26 +1204,36 @@ static void paint_list(HDC dc, int w, int h)
 	BitBlt(dc, 0, content_top(), w, h, g_bbdc, 0, 0, SRCCOPY);
 }
 
-/* tab bar hit areas */
-static void tab_rects(int w, RECT *a, RECT *b, RECT *c)
+/* tab bar hit areas: channel view = back / name / (un)subscribe,
+   otherwise = history / search / subscriptions tabs + action button (d) */
+static void tab_rects(int w, RECT *a, RECT *b, RECT *c, RECT *d)
 {
 	View *v = cur();
 	if (v->kind == V_CHANNEL) {
-		SetRect(a, 0, g_topbar, 44, g_topbar + g_tabbar);                         /* back */
-		SetRect(b, 44, g_topbar, w - 70, g_topbar + g_tabbar);                    /* name */
-		SetRect(c, w - 70, g_topbar, w, g_topbar + g_tabbar);                     /* (un)subscribe */
+		SetRect(a, 0, g_topbar, 44, g_topbar + g_tabbar);
+		SetRect(b, 44, g_topbar, w - 70, g_topbar + g_tabbar);
+		SetRect(c, w - 70, g_topbar, w, g_topbar + g_tabbar);
+		SetRect(d, 0, 0, 0, 0);
 	} else {
-		SetRect(a, 0, g_topbar, 70, g_topbar + g_tabbar);                         /* search tab */
-		SetRect(b, 70, g_topbar, 140, g_topbar + g_tabbar);                       /* subs tab */
-		SetRect(c, w - 70, g_topbar, w, g_topbar + g_tabbar);                     /* refresh (subs) */
+		SetRect(a, 0, g_topbar, 60, g_topbar + g_tabbar);
+		SetRect(b, 60, g_topbar, 120, g_topbar + g_tabbar);
+		SetRect(c, 120, g_topbar, 180, g_topbar + g_tabbar);
+		SetRect(d, w - 70, g_topbar, w, g_topbar + g_tabbar);
 	}
+}
+
+static void draw_tab(HDC dc, RECT *r, const char *label, int sel)
+{
+	SetTextColor(dc, sel ? T->tabsel : T->tabfg);
+	text_u8(dc, label, r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	if (sel) fill(dc, r->left + 8, r->bottom - 4, r->right - 8, r->bottom - 1, T->tabsel);
 }
 
 static void paint_tabbar(HDC dc, int w)
 {
 	View *v = cur();
-	RECT a, b, c;
-	tab_rects(w, &a, &b, &c);
+	RECT a, b, c, d;
+	tab_rects(w, &a, &b, &c, &d);
 	fill(dc, 0, g_topbar, w, g_topbar + g_tabbar, T->tabbg);
 	fill(dc, 0, g_topbar + g_tabbar - 1, w, g_topbar + g_tabbar, T->sep);
 	SetBkMode(dc, TRANSPARENT);
@@ -1121,16 +1250,13 @@ static void paint_tabbar(HDC dc, int w)
 		text_u8(dc, subbed ? "구독 중" : "구독", &c, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 	} else {
 		SelectObject(dc, g_fontb);
-		SetTextColor(dc, g_tab == 0 ? T->tabsel : T->tabfg);
-		text_u8(dc, "검색", &a, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-		if (g_tab == 0) fill(dc, a.left + 10, a.bottom - 4, a.right - 10, a.bottom - 1, T->tabsel);
-		SetTextColor(dc, g_tab == 1 ? T->tabsel : T->tabfg);
-		text_u8(dc, "구독", &b, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		draw_tab(dc, &a, "기록", g_tab == 2);
+		draw_tab(dc, &b, "검색", g_tab == 0);
+		draw_tab(dc, &c, "구독", g_tab == 1);
 		if (g_tab == 1) {
-			fill(dc, b.left + 10, b.bottom - 4, b.right - 10, b.bottom - 1, T->tabsel);
 			SelectObject(dc, g_fonts);
 			SetTextColor(dc, T->morefg);
-			text_u8(dc, v->busy ? "불러오는 중" : "새로고침", &c, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			text_u8(dc, v->busy ? "불러오는 중" : "새로고침", &d, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 		}
 	}
 }
@@ -1211,6 +1337,7 @@ static void show_menu(void)
 	AppendMenuW(m, MF_POPUP, (UINT_PTR)q, L"화질");
 	AppendMenuW(m, MF_SEPARATOR, 0, NULL);
 	AppendMenuW(m, MF_STRING, M_IMPORT, L"구독 목록 가져오기");
+	AppendMenuW(m, MF_STRING, M_CLEARHIST, L"시청 기록 모두 지우기");
 	AppendMenuW(m, MF_STRING, M_UPDATE, L"유튜브 연결 설정 다시 받기");
 	AppendMenuW(m, MF_STRING, M_SELFTEST, L"재생 엔진 자가진단");
 	AppendMenuW(m, MF_STRING, M_ABOUT, L"정보");
@@ -1232,6 +1359,7 @@ static void item_menu(int idx, int x, int y)
 	it = &v->list.items[idx];
 	m = CreatePopupMenu();
 	AppendMenuW(m, MF_STRING, C_PLAY, L"재생");
+	if (v->kind == V_HIST) AppendMenuW(m, MF_STRING, C_DELHIST, L"기록에서 삭제");
 	if (it->chid[0]) {
 		if (v->kind != V_CHANNEL) AppendMenuW(m, MF_STRING, C_CHANNEL, L"채널 보기");
 		if (sub_index(it->chid) >= 0) AppendMenuW(m, MF_STRING, C_UNSUB, L"채널 구독 취소");
@@ -1349,7 +1477,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 	}
 	case WM_LBUTTONDOWN: {
 		int x = (short)LOWORD(l), y = (short)HIWORD(l);
-		RECT cr, a, b, c;
+		RECT cr, a, b, c, d;
 		POINT pt;
 		GetClientRect(h, &cr);
 		pt.x = x; pt.y = y;
@@ -1360,14 +1488,15 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		}
 		if (y < content_top()) {
 			View *v = cur();
-			tab_rects(cr.right, &a, &b, &c);
+			tab_rects(cr.right, &a, &b, &c, &d);
 			if (v->kind == V_CHANNEL) {
 				if (PtInRect(&a, pt)) go_back();
 				else if (PtInRect(&c, pt)) toggle_sub(v->chid, v->title);
 			} else {
-				if (PtInRect(&a, pt)) set_tab(0);
-				else if (PtInRect(&b, pt)) set_tab(1);
-				else if (PtInRect(&c, pt) && g_tab == 1) refresh_subs();
+				if (PtInRect(&a, pt)) set_tab(2);
+				else if (PtInRect(&b, pt)) set_tab(0);
+				else if (PtInRect(&c, pt)) set_tab(1);
+				else if (PtInRect(&d, pt) && g_tab == 1) refresh_subs();
 			}
 			return 0;
 		}
@@ -1496,6 +1625,19 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 			return 0;
 		case M_EXIT: DestroyWindow(h); return 0;
 		case C_PLAY: open_video(g_ctx_idx); return 0;
+		case C_DELHIST:
+			if (cur() == &g_vhist) { hist_remove(g_ctx_idx); clamp_scroll(); InvalidateRect(h, NULL, FALSE); }
+			return 0;
+		case M_CLEARHIST:
+			if (MessageBoxW(h, L"시청 기록을 모두 지울까요?", APPNAME, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+				EnterCriticalSection(&g_lcs);
+				yt_list_free(&g_vhist.list);
+				g_vhist.scroll = 0;
+				LeaveCriticalSection(&g_lcs);
+				hist_save();
+				InvalidateRect(h, NULL, FALSE);
+			}
+			return 0;
 		case C_CHANNEL: case C_SUB: case C_UNSUB: {
 			View *v = cur();
 			if (g_ctx_idx >= 0 && g_ctx_idx < v->list.n) {
@@ -1794,6 +1936,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE hp, LPWSTR cmd, int show)
 	g_vsearch.uid = g_next_uid++;
 	g_vsubs.kind = V_SUBS;
 	g_vsubs.uid = g_next_uid++;
+	g_vhist.kind = V_HIST;
+	g_vhist.uid = g_next_uid++;
+	hist_load();
+	g_tab = g_vhist.list.n ? 2 : 0;   /* open on the watch history when there is one */
 
 	memset(&lf, 0, sizeof lf);
 	lf.lfHeight = -14;
@@ -1845,7 +1991,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE hp, LPWSTR cmd, int show)
 	th = CreateThread(NULL, 0x20000, thumb_thread, NULL, THREAD_FLAGS, NULL);
 	if (th) CloseHandle(th);
 	start_config_update(0);
-	status_set("M480Tube " VERSION " - 검색어를 입력하세요");
+	status_set(g_tab == 2 ? "M480Tube " VERSION " - 최근 본 영상" : "M480Tube " VERSION " - 검색어를 입력하세요");
 #ifndef _WIN32_WCE
 	test_hook();
 #endif
