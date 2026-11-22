@@ -84,7 +84,7 @@
       this.raw.obj = new TextEncoder().encode(D2C.OBJ_TXT);
       this.T.obj = D2C.parseTable(this.raw.obj);
     }
-    if (!this.T.levels || !this.T.monstats) throw new Error('수치표(levels.txt, monstats.txt)를 찾지 못했습니다. d2data.mpq / d2exp.mpq / patch_d2.mpq 를 모두 넣었는지 확인하세요.');
+    if (!this.T.levels || !this.T.monstats) throw new Error('수치표(levels.txt, monstats.txt)를 찾지 못했습니다. d2data.mpq 를 넣었는지 확인하세요. (확장팩판은 d2exp.mpq, patch_d2.mpq 도 필요)');
     for (i = 0; i < PAL_NAMES.length; i++) {
       var pd = await this.set.read('data\\global\\palette\\' + PAL_NAMES[i] + '\\pal.dat');
       if (pd && pd.length >= 768) this.pal[PAL_NAMES[i]] = new D2C.Palette(pd);
@@ -93,7 +93,11 @@
     if (!this.pal.act1) throw new Error('팔레트(pal.dat)를 찾지 못했습니다.');
     var use = await this.set.read('data\\local\\use');
     this.lang = (use && LANG[use[0]]) || 'eng';
-    this.log('언어: ' + this.lang + ', 수치표 ' + Object.keys(this.T).length + '개');
+    this.classic = !this.set.list.some(function (m) { return /d2exp/i.test(m.name); });
+    this.log('언어: ' + this.lang + ', 수치표 ' + Object.keys(this.T).length + '개, ' +
+      (this.classic ? '오리지널(확장팩 없음)' : '파괴의 군주 포함') + (this.T.monstats2 ? '' : ', 옛 수치표 형식(1.10 이전)'));
+    var mh = this.T.monstats.head.join(',');
+    if (!/(^|,)Code(,|$)/i.test(mh)) this.log('  ! monstats.txt 에 Code 열이 없습니다: ' + mh.substr(0, 200));
     // 이름 → 행 색인
     this.idx = {
       skills: index(this.T.skills, 'skill'), missiles: index(this.T.missiles, 'Missile'), states: index(this.T.states, 'state'),
@@ -230,9 +234,13 @@
     this.progress();
     return n;
   };
-  function monVariants(m2) {
+  function monVariants(m2, all) {
     var v = { '*': ['lit', 'med', 'hvy', 'nil'] };
-    if (!m2) return v;
+    if (!m2 || !D2C.COMPS.some(function (c) { return col(m2, c + 'v') !== ''; })) {
+      // 옛 버전(1.10 이전): 변형 정보가 없으므로 무기·방패 칸은 장비 그림 코드 전체로 찾는다
+      if (all) { v.RH = all; v.LH = all; v.SH = all; v.HD = all; v['*'] = ['lit', 'med', 'hvy', 'nil', 'hvy']; }
+      return v;
+    }
     D2C.COMPS.forEach(function (c) {
       var s = col(m2, c + 'v');
       if (s) { var a = s.replace(/"/g, '').split(',').map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean); if (a.length) v[c] = a.concat(['lit']); }
@@ -355,8 +363,8 @@
       var mr = ref.monstats[k], tok = col(mr, 'Code');
       if (!tok || doneTok['m' + tok.toLowerCase()]) continue;
       doneTok['m' + tok.toLowerCase()] = 1;
-      var m2 = this.idx.monstats2[(col(mr, 'MonStatsEx') || col(mr, 'Id')).toLowerCase()];
-      await this.addUnit(pk, 'data\\global\\monsters', tok, MON_MODES, monVariants(m2), this.pal.units);
+      var m2 = this.idx.monstats2[(col(mr, 'MonStatsEx') || col(mr, 'Id')).toLowerCase()] || mr;
+      await this.addUnit(pk, 'data\\global\\monsters', tok, MON_MODES, monVariants(m2, this.gfxCodes), this.pal.units);
     }
     this.log('[액트' + act + ' 팩] 배치 오브젝트');
     for (i = 0; i < objUnits.length; i++) {
@@ -392,8 +400,8 @@
     // 소환수
     for (var k in ref.monstats) {
       var tok = col(ref.monstats[k], 'Code'); if (!tok) continue;
-      var m2 = this.idx.monstats2[(col(ref.monstats[k], 'MonStatsEx') || k).toLowerCase()];
-      await this.addUnit(pk, 'data\\global\\monsters', tok, MON_MODES, monVariants(m2), this.pal.units);
+      var m2 = this.idx.monstats2[(col(ref.monstats[k], 'MonStatsEx') || k).toLowerCase()] || ref.monstats[k];
+      await this.addUnit(pk, 'data\\global\\monsters', tok, MON_MODES, monVariants(m2, this.gfxCodes), this.pal.units);
     }
     this.log('[' + C.name + ' 팩] 목소리·효과음');
     var re = new RegExp('^' + C.sfx + '\\\\', 'i'), srows = this.T.sounds ? this.T.sounds.rows : [];

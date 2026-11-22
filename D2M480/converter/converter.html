@@ -41,7 +41,8 @@
   <section>
     <h2><span class="step">1</span>디아블로2 폴더의 MPQ 파일 고르기</h2>
     <div id="drop">여기를 눌러 파일을 고르거나, 파일들을 이곳으로 끌어다 놓으세요.<br>
-      <b>Diablo II 설치 폴더</b>에 있는 <b>.mpq 파일을 모두</b> 한꺼번에 선택하면 됩니다.</div>
+      <b>Diablo II 설치 폴더</b>에 있는 <b>.mpq 파일을 모두</b> 한꺼번에 선택하면 됩니다.<br>
+      오리지널(1.00~)과 파괴의 군주(1.07~1.14d) 모두 됩니다.</div>
     <input type="file" id="pick" multiple accept=".mpq,.MPQ" style="display:none">
     <ul class="files" id="flist"></ul>
     <p class="note">윈도우 기본 위치: C:\Program Files (x86)\Diablo II<br>
@@ -69,7 +70,8 @@
 <!--SCRIPTS-->
 <script>
 (function () {
-  var REQUIRED = ['d2data', 'd2exp', 'd2char', 'd2sfx', 'd2music', 'patch_d2'];
+  var REQUIRED = ['d2data', 'd2char', 'd2sfx', 'd2music'];
+  var EXPANSION = ['d2exp', 'patch_d2'];          // 파괴의 군주(1.07 이상)·패치가 있으면 함께
   var OPTIONAL = ['d2xmusic', 'd2speech', 'd2xtalk'];
   var files = {};
   var $ = function (id) { return document.getElementById(id); };
@@ -90,6 +92,7 @@
     var h = '', ok = true;
     REQUIRED.forEach(function (n) { var has = !!files[n]; if (!has) ok = false;
       h += '<li class="' + (has ? 'y' : 'n') + '">' + (has ? '✔ ' : '✘ ') + n + '.mpq</li>'; });
+    EXPANSION.forEach(function (n) { h += '<li class="' + (files[n] ? 'y' : 'o') + '">' + (files[n] ? '✔ ' : '– ') + n + '.mpq' + (files[n] ? '' : ' (있으면 넣기)') + '</li>'; });
     OPTIONAL.forEach(function (n) { if (files[n]) h += '<li class="y">✔ ' + n + '.mpq</li>'; });
     $('flist').innerHTML = h;
     $('go').disabled = !ok;
