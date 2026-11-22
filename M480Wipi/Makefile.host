@@ -1,0 +1,3 @@
+SRC = src/class.c src/heap.c src/interp.c src/native.c src/str.c src/zip.c src/gfx.c src/image.c src/audio.c src/api.c src/pkg.c src/app.c src/rt_jar.c src/pal_host.c src/font_host.c test/main_host.c
+host: $(SRC)
+	gcc -O1 -g -Wall -Wno-unused-function -o /tmp/m480host $(SRC) -lm
