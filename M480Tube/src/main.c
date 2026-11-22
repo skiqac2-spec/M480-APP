@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.1"
+#define VERSION   "2.2"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -249,7 +249,7 @@ static void subs_load(void)
 }
 
 /* Google Takeout "subscriptions.csv": Channel Id,Channel Url,Channel Title */
-static int subs_import_file(const WCHAR *path)
+static int subs_import_file(const WCHAR *path, int *found)
 {
 	FILE *f = _wfopen(path, L"rb");
 	char line[600];
@@ -272,6 +272,7 @@ static int subs_import_file(const WCHAR *path)
 			while (q > title && (q[-1] == '\r' || q[-1] == '\n' || q[-1] == '"' || q[-1] == ' ')) *--q = 0;
 			while (*title == '"' || *title == ' ') title++;
 		}
+		if (!strncmp(id, "UC", 2) && strlen(id) >= 20 && strlen(id) < 32) (*found)++;
 		if (sub_add(id, title[0] ? title : id)) added++;
 	}
 	fclose(f);
@@ -1388,26 +1389,41 @@ static void start_config_update(int verbose)
 	if (th) CloseHandle(th);
 }
 
+/* imports every .csv in the usual folders that contains channel ids
+   (the Takeout file may be named subscriptions.csv, 구독정보.csv, ...) */
 static void import_subs(void)
 {
 	static const WCHAR *dirs[] = { NULL, L"\\My Documents\\", L"\\Storage Card\\", L"\\Storage Card\\My Documents\\", L"\\" };
-	int i, r = -1;
-	WCHAR path[MAX_PATH];
-	char s[400];
-	for (i = 0; i < 5 && r < 0; i++) {
-		if (!dirs[i]) app_path(path, L"subscriptions.csv");
-		else { wcscpy(path, dirs[i]); wcscat(path, L"subscriptions.csv"); }
-		r = subs_import_file(path);
+	int i, added = 0, found = 0, files = 0;
+	char s[200];
+	for (i = 0; i < 5; i++) {
+		WCHAR dir[MAX_PATH], pat[MAX_PATH], path[MAX_PATH];
+		WIN32_FIND_DATAW fd;
+		HANDLE fh;
+		if (!dirs[i]) app_path(dir, L"");
+		else wcscpy(dir, dirs[i]);
+		wcscpy(pat, dir);
+		wcscat(pat, L"*.csv");
+		fh = FindFirstFileW(pat, &fd);
+		if (fh == INVALID_HANDLE_VALUE) continue;
+		do {
+			int f = 0, r;
+			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+			if (wcslen(dir) + wcslen(fd.cFileName) >= MAX_PATH) continue;
+			wcscpy(path, dir);
+			wcscat(path, fd.cFileName);
+			r = subs_import_file(path, &f);
+			if (r >= 0 && f > 0) { added += r; found += f; files++; }
+		} while (FindNextFileW(fh, &fd));
+		FindClose(fh);
 	}
-	if (r < 0) {
-		msgbox_u8("subscriptions.csv 파일을 찾지 못했습니다.\n\n"
-		          "1) PC에서 takeout.google.com 에 접속해 'YouTube 및 YouTube Music' 중 '구독정보'만 골라 내보내기\n"
-		          "2) 받은 압축파일 안의 subscriptions.csv 를 폰의 M480Tube 폴더(또는 My Documents)에 복사\n"
-		          "3) 다시 이 메뉴를 누르세요.", MB_OK);
+	if (!files) {
+		msgbox_u8("구독 목록 파일(.csv)을 찾지 못했습니다.\n\n구글 테이크아웃에서 받은 구독정보 .csv 파일을 M480Tube 폴더에 넣어 주세요.", MB_OK);
 		return;
 	}
 	subs_save();
-	_snprintf(s, sizeof s, "구독 채널 %d개를 가져왔습니다 (전체 %d개).", r, g_nsubs);
+	if (added) _snprintf(s, sizeof s, "채널 %d개를 새로 구독했습니다.\n(전체 구독 %d개)", added, g_nsubs);
+	else _snprintf(s, sizeof s, "이미 모두 구독 중입니다.\n(전체 구독 %d개)", g_nsubs);
 	msgbox_u8(s, MB_OK);
 	g_subs_loaded_once = 0;
 	set_tab(1);
@@ -1618,10 +1634,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 			return 0;
 		}
 		case M_ABOUT:
-			msgbox_u8("M480Tube " VERSION "\nSCH-M480용 유튜브 뷰어\n\n"
-			          "· 채널 이름을 누르거나 영상을 길게 누르면 채널/구독 메뉴가 나옵니다.\n"
-			          "· 구독은 이 폰에만 저장됩니다 (m480tube_subs.txt).\n"
-			          "· 재생이 안 되면 메뉴의 '유튜브 연결 설정 다시 받기'를 눌러 보세요.", MB_OK);
+			msgbox_u8("M480Tube " VERSION "\nSCH-M480용 유튜브 뷰어\n\n채널 이름을 누르면 채널로,\n영상을 길게 누르면 메뉴가 나옵니다.", MB_OK);
 			return 0;
 		case M_EXIT: DestroyWindow(h); return 0;
 		case C_PLAY: open_video(g_ctx_idx); return 0;

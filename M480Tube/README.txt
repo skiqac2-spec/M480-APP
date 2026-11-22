@@ -23,7 +23,8 @@ M480Tube - SCH-M480(Windows Mobile 6.1)용 유튜브 뷰어
 - 구독은 유튜브 계정이 아니라 이 폰에 저장됩니다 (M480Tube 폴더의 m480tube_subs.txt).
 - 유튜브 계정의 구독 목록 옮기기:
   1) PC에서 takeout.google.com 접속 > 'YouTube 및 YouTube Music'만 선택 > 포함할 데이터에서 '구독정보'만 선택 > 내보내기
-  2) 받은 압축파일 안의 subscriptions.csv 를 폰의 M480Tube 폴더(또는 My Documents)에 복사
+  2) 받은 압축파일 안의 구독정보 .csv 파일을 폰의 M480Tube 폴더(또는 My Documents)에 복사
+     (파일 이름은 달라도 됩니다)
   3) 메뉴 > '구독 목록 가져오기'
 
 [화면 설정] 메뉴 > 화면
