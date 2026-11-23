@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.6"
+#define VERSION   "2.7"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -1086,7 +1086,8 @@ static LRESULT CALLBACK play_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		if (g_player) player_drag(g_player, (short)LOWORD(l), (short)HIWORD(l), 1);
 		return 0;
 	case WM_KEYDOWN:
-		if (w == VK_ESCAPE || w == VK_BACK || w == VK_F2) { PostMessageW(h, WM_CLOSE, 0, 0); return 0; }
+		/* soft keys (F1/F2) switch the picture fit; Back/Esc returns to the list */
+		if (w == VK_ESCAPE || w == VK_BACK) { PostMessageW(h, WM_CLOSE, 0, 0); return 0; }
 		if (g_player) player_key(g_player, (int)w);
 		return 0;
 	case WM_TIMER:

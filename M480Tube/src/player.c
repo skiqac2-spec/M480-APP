@@ -472,6 +472,9 @@ struct Player {
 	int media_post;
 	char adiag[400];
 	YtStreams ys;      /* own copy: alternatives / client for video fallback */
+	int fill;          /* 0 = whole picture (letterbox), 1 = fill the area (crop) */
+	char toast[80];
+	DWORD toast_tick;
 	int alt_next;
 };
 
@@ -539,14 +542,20 @@ static void init_tabs(void)
 }
 
 /* scale YUV420P frame into dst (w x h) */
-static void yuv_to_565(const AVFrame *f, unsigned short *dst, int w, int h)
+/* scale YUV420P frame into dst (w x h); crop = take only the centre part with
+   the destination's aspect ratio (fill mode) */
+static void yuv_to_565(const AVFrame *f, unsigned short *dst, int w, int h, int crop)
 {
 	static int xmap[1024];
-	int x, y, sw = f->width, sh = f->height;
+	int x, y, sw = f->width, sh = f->height, x0 = 0, y0 = 0;
 	if (w <= 0 || h <= 0 || w > 1024) return;
-	for (x = 0; x < w; x++) xmap[x] = (int)((long)x * sw / w);
+	if (crop) {
+		if ((long)sw * h > (long)sh * w) { int cw = (int)((long)sh * w / h); x0 = (sw - cw) / 2; sw = cw; }
+		else { int ch = (int)((long)sw * h / w); y0 = (sh - ch) / 2; sh = ch; }
+	}
+	for (x = 0; x < w; x++) xmap[x] = x0 + (int)((long)x * sw / w);
 	for (y = 0; y < h; y++) {
-		int sy = (int)((long)y * sh / h);
+		int sy = y0 + (int)((long)y * sh / h);
 		const unsigned char *py = f->data[0] + sy * f->linesize[0];
 		const unsigned char *pu = f->data[1] + (sy >> 1) * f->linesize[1];
 		const unsigned char *pv = f->data[2] + (sy >> 1) * f->linesize[2];
@@ -562,21 +571,32 @@ static void yuv_to_565(const AVFrame *f, unsigned short *dst, int w, int h)
 }
 
 /* ---------------- layout ---------------- */
+/* vertical (shorts) videos and landscape mode use the whole screen with
+   controls floating on top; a normal video in portrait sits above the controls */
+static int floating(Player *p)
+{
+	return p->ori != ORI_PORTRAIT || p->srch > p->srcw;
+}
+
 static void layout(Player *p)
 {
 	int aw = p->srcw > 0 ? p->srcw : 16, ah = p->srch > 0 ? p->srch : 9;
-	int vw, vh;
-	if (p->ori == ORI_PORTRAIT) {
-		vw = p->LW;
-		vh = p->LW * ah / aw;
-		if (vh > p->LH - TB - BB) vh = p->LH - TB - BB;
-		SetRect(&p->vrect, (p->LW - vw) / 2, TB, (p->LW - vw) / 2 + vw, TB + vh);
-	} else {
-		vw = p->LW;
-		vh = p->LW * ah / aw;
-		if (vh > p->LH) { vh = p->LH; vw = p->LH * aw / ah; }
-		SetRect(&p->vrect, (p->LW - vw) / 2, (p->LH - vh) / 2, (p->LW - vw) / 2 + vw, (p->LH - vh) / 2 + vh);
+	int ax, ay, AW, AH, vw, vh;
+	if (floating(p)) { ax = 0; ay = 0; AW = p->LW; AH = p->LH; }
+	else { ax = 0; ay = TB; AW = p->LW; AH = p->LH - TB - BB; }
+	if (AW < 16) AW = 16;
+	if (AH < 16) AH = 16;
+	if (p->fill && floating(p)) { vw = AW; vh = AH; }
+	else {
+		/* largest size with the video's own aspect ratio that fits */
+		vw = AW;
+		vh = (int)((long)AW * ah / aw);
+		if (vh > AH) { vh = AH; vw = (int)((long)AH * aw / ah); }
+		if (p->fill && !floating(p)) vw = AW; /* fill the width, crop top/bottom */
 	}
+	if (vw > 1024) vw = 1024;
+	if (floating(p)) SetRect(&p->vrect, ax + (AW - vw) / 2, ay + (AH - vh) / 2, ax + (AW - vw) / 2 + vw, ay + (AH - vh) / 2 + vh);
+	else SetRect(&p->vrect, ax + (AW - vw) / 2, ay, ax + (AW - vw) / 2 + vw, ay + vh);
 	vw = p->vrect.right - p->vrect.left;
 	vh = p->vrect.bottom - p->vrect.top;
 	if (vw != p->vfw || vh != p->vfh) {
@@ -591,7 +611,7 @@ static void layout(Player *p)
 
 static int bottom_y(Player *p)
 {
-	return p->ori == ORI_PORTRAIT ? p->vrect.bottom : p->LH - BB;
+	return floating(p) ? p->LH - BB : p->vrect.bottom;
 }
 
 static HBITMAP make_dib(HDC ref, int w, int h, unsigned short **bits)
@@ -708,7 +728,8 @@ static void draw_overlay(Player *p, HDC dc)
 	fill(dc, 0, 0, p->LW, TB, RGB(28, 28, 28));
 	draw_button(dc, 2, 2, 58, TB - 2, "< 목록");
 	draw_button(dc, p->LW - 50, 2, p->LW - 2, TB - 2, "회전");
-	SetRect(&rc, 62, 0, p->LW - 54, TB);
+	draw_button(dc, p->LW - 100, 2, p->LW - 54, TB - 2, p->fill ? "채움" : "비율");
+	SetRect(&rc, 62, 0, p->LW - 104, TB);
 	text_u8(dc, p->title, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | TXT_ELLIPSIS | DT_NOPREFIX);
 	/* bottom bar */
 	fill(dc, 0, y, p->LW, y + BB, RGB(28, 28, 28));
@@ -769,6 +790,14 @@ static void draw_overlay(Player *p, HDC dc)
 		fill(dc, cx - 8, cy - 9, cx - 3, cy + 9, RGB(255, 255, 255));
 		fill(dc, cx + 3, cy - 9, cx + 8, cy + 9, RGB(255, 255, 255));
 	}
+	if (p->toast[0] && GetTickCount() - p->toast_tick < 2500) {
+		RECT tr;
+		int cy = (TB + bottom_y(p)) / 2;
+		fill(dc, p->LW / 2 - 80, cy - 12, p->LW / 2 + 80, cy + 12, RGB(40, 40, 40));
+		SetRect(&tr, p->LW / 2 - 80, cy - 12, p->LW / 2 + 80, cy + 12);
+		SetTextColor(dc, RGB(255, 255, 255));
+		text_u8(dc, p->toast, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	}
 	/* errors are shown over the (unused) picture area, in a small font */
 	if (p->state == PS_ERROR) {
 		HFONT of;
@@ -784,11 +813,11 @@ static void draw_overlay(Player *p, HDC dc)
 		text_u8(dc, p->msg, &rc, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
 		SelectObject(dc, of);
 		DeleteObject(smf);
-		if (p->ori == ORI_PORTRAIT) fill(dc, 0, y + BB, p->LW, p->LH, RGB(0, 0, 0));
+		if (!floating(p)) fill(dc, 0, y + BB, p->LW, p->LH, RGB(0, 0, 0));
 		return;
 	}
 	/* portrait: info area */
-	if (p->ori == ORI_PORTRAIT) {
+	if (!floating(p)) {
 		int iy = y + BB + 6;
 		fill(dc, 0, y + BB, p->LW, p->LH, RGB(0, 0, 0));
 		SetTextColor(dc, RGB(200, 200, 200));
@@ -820,7 +849,7 @@ static void compose(Player *p)
 	int cs = p->ori == ORI_PORTRAIT ? p->sstride : p->lstride;
 	HDC cdc = p->ori == ORI_PORTRAIT ? p->sdc : p->ldc;
 	int y;
-	int ovl = p->ovl || p->ori == ORI_PORTRAIT || p->paused || p->state != PS_PLAYING;
+	int ovl = p->ovl || !floating(p) || p->paused || p->state != PS_PLAYING;
 	if (!cv || !cdc) return;
 	if (p->need_clear) {
 		memset(cv, 0, (size_t)cs * 2 * p->LH);
@@ -1204,9 +1233,14 @@ static DWORD WINAPI video_thread(LPVOID arg)
 	if (r0 < 0) { set_error(p, "디코더를 열 수 없습니다"); goto out; }
 	if (fc->streams[vidx]->codecpar->width > 0) {
 		EnterCriticalSection(&p->cs);
-		if (p->srcw != fc->streams[vidx]->codecpar->width || p->srch != fc->streams[vidx]->codecpar->height) {
-			p->srcw = fc->streams[vidx]->codecpar->width;
-			p->srch = fc->streams[vidx]->codecpar->height;
+		AVCodecParameters *cp = fc->streams[vidx]->codecpar;
+		int dw = cp->width, dh = cp->height;
+		/* non-square pixels: use the display shape */
+		if (cp->sample_aspect_ratio.num > 0 && cp->sample_aspect_ratio.den > 0 && cp->sample_aspect_ratio.num != cp->sample_aspect_ratio.den)
+			dw = (int)((long long)dw * cp->sample_aspect_ratio.num / cp->sample_aspect_ratio.den);
+		if (p->srcw != dw || p->srch != dh) {
+			p->srcw = dw;
+			p->srch = dh;
 			layout(p);
 		}
 		LeaveCriticalSection(&p->cs);
@@ -1300,7 +1334,7 @@ static DWORD WINAPI video_thread(LPVOID arg)
 			if (show && (fr->format == AV_PIX_FMT_YUV420P || fr->format == AV_PIX_FMT_YUVJ420P)) {
 				EnterCriticalSection(&p->cs);
 				if (p->vframe) {
-					yuv_to_565(fr, p->vframe, p->vfw, p->vfh);
+					yuv_to_565(fr, p->vframe, p->vfw, p->vfh, p->fill);
 					p->have_frame = 1;
 				}
 				LeaveCriticalSection(&p->cs);
@@ -1554,6 +1588,19 @@ static void toggle_pause(Player *p)
 	p->ovl_tick = GetTickCount();
 }
 
+static void toggle_fill(Player *p)
+{
+	EnterCriticalSection(&p->cs);
+	p->fill = !p->fill;
+	layout(p);
+	strcpy(p->toast, p->fill ? "화면 맞춤: 꽉 채우기" : "화면 맞춤: 원본 비율");
+	p->toast_tick = GetTickCount();
+	LeaveCriticalSection(&p->cs);
+	p->ovl = 1;
+	p->ovl_tick = GetTickCount();
+	InvalidateRect(p->hwnd, NULL, FALSE);
+}
+
 static void to_logical(Player *p, int sx, int sy, int *lx, int *ly)
 {
 	if (p->ori == ORI_LAND_LEFT) { *lx = p->SH - 1 - sy; *ly = sx; }
@@ -1578,7 +1625,7 @@ int player_tap(Player *p, int x, int y)
 	int lx, ly;
 	RECT rew, play, fwd, track;
 	POINT pt;
-	int ovl_shown = p->ovl || p->ori == ORI_PORTRAIT || p->paused || p->state != PS_PLAYING;
+	int ovl_shown = p->ovl || !floating(p) || p->paused || p->state != PS_PLAYING;
 	to_logical(p, x, y, &lx, &ly);
 	pt.x = lx; pt.y = ly;
 	if (!ovl_shown) {
@@ -1596,7 +1643,7 @@ int player_tap(Player *p, int x, int y)
 			make_surfaces(p);
 			LeaveCriticalSection(&p->cs);
 			InvalidateRect(p->hwnd, NULL, FALSE);
-		}
+		} else if (lx > p->LW - 102) toggle_fill(p);
 		return TAP_NONE;
 	}
 	play_rects(p, &rew, &play, &fwd, &track);
@@ -1607,7 +1654,7 @@ int player_tap(Player *p, int x, int y)
 		p->drag = 1;
 		p->drag_ms = track_ms(p, lx);
 		SetCapture(p->hwnd);
-	} else if (p->ori != ORI_PORTRAIT && ly > TB && ly < bottom_y(p)) {
+	} else if (floating(p) && ly > TB && ly < bottom_y(p)) {
 		/* tap on the picture hides the controls */
 		p->ovl = 0;
 		p->need_clear = 1;
@@ -1638,6 +1685,7 @@ void player_key(Player *p, int vk)
 	case VK_RIGHT: do_seek(p, cur_pos(p) + 10000); break;
 	case VK_RETURN: case VK_SPACE: toggle_pause(p); break;
 	case VK_UP: case VK_DOWN: p->ovl = 1; break;
+	case VK_F1: case VK_F2: toggle_fill(p); return;   /* soft keys */
 	default: return;
 	}
 	p->ovl = 1;
@@ -1660,12 +1708,13 @@ void player_tick(Player *p)
 	else if (p->state == PS_BUFFERING && !starving) p->state = PS_PLAYING;
 	if (p->state == PS_LOADING && p->vs.failed) set_error(p, p->vs.err);
 	/* auto-hide controls in landscape */
-	if (p->ori != ORI_PORTRAIT && p->ovl && !p->drag && p->state == PS_PLAYING && now - p->ovl_tick > 4000) {
+	if (floating(p) && p->ovl && !p->drag && p->state == PS_PLAYING && now - p->ovl_tick > 4000) {
 		p->ovl = 0;
 		p->need_clear = 1;
 	}
 	/* refresh overlay when no frames are coming (paused, buffering, ...) or the clock changes */
-	if (p->ori == ORI_PORTRAIT || p->ovl || p->state != PS_PLAYING || p->need_clear) present(p);
+	if (!floating(p) || p->ovl || p->state != PS_PLAYING || p->need_clear || (p->toast[0] && now - p->toast_tick < 2500)) present(p);
+	if (p->toast[0] && now - p->toast_tick >= 2500) { p->toast[0] = 0; p->need_clear = 1; }
 }
 
 #ifndef _WIN32_WCE
