@@ -697,6 +697,21 @@ static int g_sel = -1;              /* 키 이동용 선택 */
 static int g_selVisible;            /* 방향키를 쓴 뒤에만 선택 표시 */
 static int g_scroll[3];
 static wchar_t **g_title, **g_sub;  /* 목록 표시용 제목/부제 */
+
+/* 폴더별 보기 */
+typedef struct { wchar_t *dir; const wchar_t *name; int *items; int n, cap; } Folder;
+static Folder *g_folders;
+static int g_folderCount, g_folderCap;
+#define LIB_SONGS   0
+#define LIB_FOLDERS 1
+#define LIB_INSIDE  2
+static int g_libMode;               /* 0 노래 / 1 폴더 목록 / 2 폴더 안 */
+static int g_openFolder = -1;
+static int g_libScroll[3];
+static RECT g_hit[5];               /* 머리말 버튼: 탭0/뒤로, 탭1, 재생, 셔플, ••• */
+/* 재생 대기열: NULL이면 전체 곡 */
+static int *g_queue;
+static int g_qLen;
 static HBITMAP g_bb;                /* 백버퍼 */
 static int g_bbW, g_bbH;
 static int g_busy;                  /* 목록 검색 중 */
@@ -791,6 +806,89 @@ static void build_names(void)
         if (!g_title[i]) g_title[i] = wdup(L"?", 1);
         if (!g_sub[i]) g_sub[i] = wdup(L"", 0);
     }
+}
+
+static void free_folders(void)
+{
+    int i;
+    for (i = 0; i < g_folderCount; i++) { free(g_folders[i].dir); free(g_folders[i].items); }
+    g_folderCount = 0;
+}
+
+static int cmp_folder(const void *a, const void *b)
+{
+    const Folder *x = (const Folder *)a, *y = (const Folder *)b;
+    int c = _wcsicmp(x->name, y->name);
+    return c ? c : _wcsicmp(x->dir, y->dir);
+}
+
+/* 곡이 들어 있는 폴더(바로 위 폴더) 별로 묶기 */
+static void build_folders(void)
+{
+    int i, last = -1;
+    free_folders();
+    g_queue = NULL; g_qLen = 0;
+    for (i = 0; i < g_fileCount; i++) {
+        const wchar_t *path = g_files[i];
+        const wchar_t *sl = wcsrchr(path, L'\\');
+        int dl = sl ? (int)(sl - path) : 0, f = -1, k;
+        if (last >= 0 && (int)wcslen(g_folders[last].dir) == dl && !_wcsnicmp(g_folders[last].dir, path, (size_t)dl)) f = last;
+        for (k = 0; f < 0 && k < g_folderCount; k++)
+            if ((int)wcslen(g_folders[k].dir) == dl && !_wcsnicmp(g_folders[k].dir, path, (size_t)dl)) f = k;
+        if (f < 0) {
+            Folder *fo;
+            const wchar_t *nm;
+            if (g_folderCount >= g_folderCap) {
+                int nc = g_folderCap ? g_folderCap * 2 : 32;
+                Folder *nf = (Folder *)realloc(g_folders, (size_t)nc * sizeof(Folder));
+                if (!nf) continue;
+                g_folders = nf; g_folderCap = nc;
+            }
+            fo = &g_folders[g_folderCount];
+            memset(fo, 0, sizeof(*fo));
+            fo->dir = wdup(path, dl);
+            if (!fo->dir) continue;
+            nm = wcsrchr(fo->dir, L'\\');
+            fo->name = (nm && nm[1]) ? nm + 1 : (dl ? fo->dir : L"\\");
+            f = g_folderCount++;
+        }
+        if (g_folders[f].n >= g_folders[f].cap) {
+            int nc = g_folders[f].cap ? g_folders[f].cap * 2 : 16;
+            int *ni = (int *)realloc(g_folders[f].items, (size_t)nc * sizeof(int));
+            if (!ni) continue;
+            g_folders[f].items = ni; g_folders[f].cap = nc;
+        }
+        g_folders[f].items[g_folders[f].n++] = i;
+        last = f;
+    }
+    if (g_folderCount > 1) qsort(g_folders, (size_t)g_folderCount, sizeof(Folder), cmp_folder);
+    if (g_libMode == LIB_INSIDE) g_libMode = LIB_FOLDERS;
+    g_openFolder = -1;
+}
+
+/* 현재 보기의 줄 수 / 줄 → 곡 번호 */
+static int lib_count(void)
+{
+    if (g_libMode == LIB_FOLDERS) return g_folderCount;
+    if (g_libMode == LIB_INSIDE && g_openFolder >= 0) return g_folders[g_openFolder].n;
+    return g_fileCount;
+}
+
+static int lib_file(int row)
+{
+    if (row < 0) return -1;
+    if (g_libMode == LIB_FOLDERS) return -1;
+    if (g_libMode == LIB_INSIDE && g_openFolder >= 0)
+        return row < g_folders[g_openFolder].n ? g_folders[g_openFolder].items[row] : -1;
+    return row < g_fileCount ? row : -1;
+}
+
+static int folder_has(int f, int file)
+{
+    int i;
+    if (f < 0 || file < 0) return 0;
+    for (i = 0; i < g_folders[f].n; i++) if (g_folders[f].items[i] == file) return 1;
+    return 0;
 }
 
 static void fmt_time(wchar_t *o, DWORD ms)
@@ -1094,7 +1192,7 @@ static void layout(void)
     if (N_chipY + S(30) > H) N_chipY = H - S(32);
 }
 
-static int list_content_h(void) { return L_listTop + g_fileCount * L_rowH; }
+static int list_content_h(void) { return L_listTop + lib_count() * L_rowH; }
 static int set_rows(void) { return 7; }
 #define SET_ROWH S(40)
 #define SET_TOP  S(48)
@@ -1171,9 +1269,23 @@ static COLORREF now_bg_at(int y)
 }
 
 /* ---------------------------------------------------------------- 보관함 화면 */
+static void set_hit(int k, int x, int y, int w, int h)
+{
+    g_hit[k].left = x; g_hit[k].top = y; g_hit[k].right = x + w; g_hit[k].bottom = y + h;
+}
+
+static void draw_folder_art(HDC dc, int f, int x, int y, int s, COLORREF bg)
+{
+    const COLORREF *p = g_pal[name_hash(g_folders[f].name) & 7];
+    grad(dc, x, y, s, s, p[0], p[1]);
+    rrect(dc, x + s * 22 / 100, y + s * 30 / 100, s * 26 / 100, s * 14 / 100, S(2), RGB(255, 255, 255));
+    rrect(dc, x + s * 22 / 100, y + s * 37 / 100, s * 56 / 100, s * 38 / 100, S(2), RGB(255, 255, 255));
+    round_corners(dc, x, y, s, S(4), bg, bg);
+}
+
 static void paint_lib(HDC dc, const Status *st)
 {
-    int i, first;
+    int i, first, count = lib_count();
     wchar_t buf[64];
     int scroll = g_scroll[SCR_LIB];
     int hy = -scroll;             /* 머리말 위치 */
@@ -1181,40 +1293,72 @@ static void paint_lib(HDC dc, const Status *st)
 
     fill(dc, 0, 0, W, H, C_BG);
     SetBkMode(dc, TRANSPARENT);
+    memset(g_hit, 0, sizeof(g_hit));
 
-    /* 머리말: 큰 제목 + [재생][셔플] + ••• (목록과 함께 위로 밀려 올라감) */
+    /* 머리말 (목록과 함께 위로 밀려 올라감) */
     if (hy + L_listTop > 0) {
-        int pw = S(62), ph = S(28), py = hy + S(9), tw;
-        int px2 = W - S(44) - pw, px1 = px2 - S(6) - pw;
-        text(dc, L"보관함", S(14), hy + S(4), px1 - S(14), S(38), fTitle, C_TEXT, TL);
-        rrect(dc, px1, py, pw, ph, S(14), C_CARD);
-        rrect(dc, px2, py, pw, ph, S(14), C_CARD);
-        tw = text_w(dc, L"재생", fBold);
-        icon_play(dc, px1 + pw / 2 - tw / 2 - S(6), py + ph / 2, S(10), C_ACCENT);
-        text(dc, L"재생", px1 + pw / 2 - tw / 2 + S(3), py, tw + S(4), ph, fBold, C_ACCENT, TL);
-        tw = text_w(dc, L"셔플", fBold);
-        icon_shuffle(dc, px2 + pw / 2 - tw / 2 - S(8), py + ph / 2, C_ACCENT);
-        text(dc, L"셔플", px2 + pw / 2 - tw / 2 + S(5), py, tw + S(4), ph, fBold, C_ACCENT, TL);
-        icon_dots(dc, W - S(22), py + ph / 2, C_ACCENT);
+        int cy = hy + L_listTop / 2;
+        int rr = S(15);
+        int pcx = W - S(94), scx = W - S(58);
+        if (g_libMode == LIB_INSIDE && g_openFolder >= 0) {
+            Folder *fo = &g_folders[g_openFolder];
+            icon_chevron_left(dc, S(16), cy, C_ACCENT);
+            set_hit(0, 0, hy, pcx - rr - S(4), L_listTop);
+            text(dc, fo->name, S(30), hy + S(4), pcx - rr - S(36), S(22), fHead, C_TEXT, TL);
+            wsprintfW(buf, L"%d곡", fo->n);
+            text(dc, buf, S(30), hy + S(25), pcx - rr - S(36), S(16), fSmall, C_SUB, TL);
+        } else {
+            int k, x = S(12);
+            static const wchar_t *tabs[2] = { L"노래", L"폴더" };
+            for (k = 0; k < 2; k++) {
+                int tw = text_w(dc, tabs[k], fHead) + S(24);
+                int on = (g_libMode == k);
+                rrect(dc, x, cy - S(15), tw, S(30), S(15), on ? RGB(245, 245, 248) : C_CARD);
+                text(dc, tabs[k], x, cy - S(15), tw, S(30), fHead, on ? C_BG : C_SUB, TC);
+                set_hit(k, x, hy, tw, L_listTop);
+                x += tw + S(6);
+            }
+        }
+        circle(dc, pcx, cy, rr, C_CARD);
+        icon_play(dc, pcx + S(1), cy, S(12), C_ACCENT);
+        circle(dc, scx, cy, rr, C_CARD);
+        icon_shuffle(dc, scx, cy, C_ACCENT);
+        icon_dots(dc, W - S(22), cy, C_ACCENT);
+        set_hit(2, pcx - rr - S(3), hy, rr * 2 + S(5), L_listTop);
+        set_hit(3, scx - rr - S(2), hy, rr * 2 + S(5), L_listTop);
+        set_hit(4, W - S(40), hy, S(40), L_listTop);
     }
 
-    /* 곡 목록 */
-    if (g_fileCount > 0) {
+    /* 목록 */
+    if (count > 0) {
         first = (scroll - L_listTop) / L_rowH;
         if (first < 0) first = 0;
-        for (i = first; i < g_fileCount; i++) {
+        for (i = first; i < count; i++) {
             int ry = L_listTop + i * L_rowH - scroll;
-            int playing = (i == g_curIndex);
             COLORREF rowbg = C_BG;
+            const wchar_t *t1, *t2;
+            int playing, f = lib_file(i);
             if (ry >= L_listBot) break;
             if (ry + L_rowH <= 0) continue;
             if (i == t_pressRow || (i == g_sel && t_pressRow < 0 && g_selVisible)) rowbg = C_PRESS;
             fill(dc, 0, ry, W, L_rowH, rowbg);
-            draw_art(dc, i, S(12), ry + S(5), art, 0, rowbg, rowbg);
+            if (g_libMode == LIB_FOLDERS) {
+                playing = folder_has(i, g_curIndex);
+                draw_folder_art(dc, i, S(12), ry + S(5), art, rowbg);
+                t1 = g_folders[i].name;
+                wsprintfW(buf, L"%d곡", g_folders[i].n);
+                t2 = buf;
+                icon_chevron_right(dc, W - S(18), ry + L_rowH / 2, C_DIM);
+            } else {
+                playing = (f == g_curIndex);
+                draw_art(dc, f, S(12), ry + S(5), art, 0, rowbg, rowbg);
+                t1 = g_title[f];
+                t2 = g_sub[f];
+            }
             if (playing && st->state != 0) draw_eq(dc, S(12), ry + S(5), art, RGB(255, 255, 255), st->state == 1);
-            text(dc, g_title[i], S(12) + art + S(10), ry + S(3), W - art - S(34), S(19),
+            text(dc, t1, S(12) + art + S(10), ry + S(3), W - art - S(40), S(19),
                  fBold, playing ? C_ACCENT : C_TEXT, TL);
-            text(dc, g_sub[i], S(12) + art + S(10), ry + S(20), W - art - S(34), S(16),
+            text(dc, t2, S(12) + art + S(10), ry + S(20), W - art - S(40), S(16),
                  fSmall, C_SUB, TL);
             fill(dc, S(12) + art + S(10), ry + L_rowH - 1, W, 1, C_SEP);
         }
@@ -1232,7 +1376,6 @@ static void paint_lib(HDC dc, const Status *st)
         text(dc, L"SD카드에 MP3를 넣고", 0, L_listTop + S(58), W, S(18), fNorm, C_SUB, TC);
         text(dc, L"오른쪽 위 ••• → 목록 새로고침", 0, L_listTop + S(76), W, S(18), fNorm, C_SUB, TC);
     }
-    (void)buf;
 
     if (g_busy) {
         rrect(dc, W / 2 - S(80), H / 2 - S(24), S(160), S(48), S(10), C_CARD);
@@ -1494,7 +1637,7 @@ static void play_index(int idx, DWORD ms)
     int hadMini = (g_curIndex >= 0);
     if (idx < 0 || idx >= g_fileCount) return;
     g_curIndex = idx;
-    g_sel = idx;
+    g_selVisible = 0;
     g_set.lastIndex = idx;
     post_cmd(CMD_PLAY, idx, ms);
     if (!hadMini) { layout(); clamp_scroll(SCR_LIB); }
@@ -1502,24 +1645,48 @@ static void play_index(int idx, DWORD ms)
     redraw();
 }
 
+/* 대기열 정하기: 폴더 안에서 재생하면 그 폴더 곡만, 아니면 전체 */
+static void set_queue_for_view(void)
+{
+    if (g_libMode == LIB_INSIDE && g_openFolder >= 0) {
+        g_queue = g_folders[g_openFolder].items;
+        g_qLen = g_folders[g_openFolder].n;
+    } else {
+        g_queue = NULL;
+        g_qLen = 0;
+    }
+}
+
+static int q_len(void) { return g_queue ? g_qLen : g_fileCount; }
+static int q_at(int p) { return g_queue ? g_queue[p] : p; }
+static int q_pos(int file)
+{
+    int i;
+    if (!g_queue) return file;
+    for (i = 0; i < g_qLen; i++) if (g_queue[i] == file) return i;
+    return -1;
+}
+
 static int next_index(int dir, int fromEnd)
 {
-    if (g_fileCount <= 0) return -1;
-    if (fromEnd && g_set.order == 2) return g_curIndex;
-    if (g_set.order == 1 && g_fileCount > 1) {
+    int n = q_len(), p;
+    if (n <= 0) return -1;
+    if (fromEnd && g_set.order == 2 && g_curIndex >= 0) return g_curIndex;
+    if (g_set.order == 1 && n > 1) {
         int r;
-        do { r = (int)(((unsigned)rand() * 32768u + (unsigned)rand()) % (unsigned)g_fileCount); } while (r == g_curIndex);
+        do { r = q_at((int)(((unsigned)rand() * 32768u + (unsigned)rand()) % (unsigned)n)); } while (r == g_curIndex);
         return r;
     }
-    if (g_curIndex < 0) return 0;
-    return (g_curIndex + dir + g_fileCount) % g_fileCount;
+    p = g_curIndex >= 0 ? q_pos(g_curIndex) : -1;
+    if (p < 0) return q_at(dir < 0 ? n - 1 : 0);
+    return q_at((p + dir + n) % n);
 }
 
 static void act_playpause(void)
 {
     Status st = get_status();
     if (st.state == 0) {
-        int idx = g_curIndex >= 0 ? g_curIndex : (g_sel >= 0 ? g_sel : 0);
+        int idx = g_curIndex >= 0 ? g_curIndex : (g_set.lastIndex >= 0 ? g_set.lastIndex : 0);
         g_errorStreak = 0;
         if (idx == g_set.lastIndex && g_set.lastPosMs > 3000) play_index(idx, g_set.lastPosMs);   /* 이어 듣기 */
         else play_index(idx, 0);
@@ -1550,8 +1717,10 @@ static void do_rescan(void)
     scan_all();
     save_list();
     build_names();
+    build_folders();
     g_busy = 0;
     g_scroll[SCR_LIB] = 0;
+    memset(g_libScroll, 0, sizeof(g_libScroll));
     layout();
     redraw();
 }
@@ -1603,7 +1772,7 @@ static int lib_row_at(int x, int y)
     (void)x;
     if (y >= L_listBot) return -1;
     y = y + g_scroll[SCR_LIB] - L_listTop;
-    if (y >= 0 && y / L_rowH < g_fileCount) return y / L_rowH;
+    if (y >= 0 && y / L_rowH < lib_count()) return y / L_rowH;
     return -1;
 }
 
@@ -1658,6 +1827,46 @@ static void on_move(int x, int y)
     }
 }
 
+static void set_lib_mode(int m)
+{
+    g_libScroll[g_libMode] = g_scroll[SCR_LIB];
+    g_libMode = m;
+    g_scroll[SCR_LIB] = (m == LIB_INSIDE) ? 0 : g_libScroll[m];
+    g_sel = -1; g_selVisible = 0;
+    clamp_scroll(SCR_LIB);
+    if (m != LIB_INSIDE) { g_set.panel = m; save_settings(); }
+    redraw();
+}
+
+static void open_folder(int f)
+{
+    if (f < 0 || f >= g_folderCount) return;
+    g_openFolder = f;
+    set_lib_mode(LIB_INSIDE);
+}
+
+static void lib_back(void)
+{
+    if (g_libMode == LIB_INSIDE) set_lib_mode(LIB_FOLDERS);
+}
+
+static void lib_play_row(int r)
+{
+    int f;
+    if (g_libMode == LIB_FOLDERS) { open_folder(r); return; }
+    f = lib_file(r);
+    if (f < 0) return;
+    g_errorStreak = 0;
+    if (f == g_curIndex && get_status().state != 0) { go(SCR_NOW); return; }
+    set_queue_for_view();
+    play_index(f, 0);
+}
+
+static int in_rect(const RECT *r, int x, int y)
+{
+    return x >= r->left && x < r->right && y >= r->top && y < r->bottom;
+}
+
 static void tap_lib(int x, int y)
 {
     if (g_curIndex >= 0 && y >= H - L_miniH) {
@@ -1667,31 +1876,24 @@ static void tap_lib(int x, int y)
         return;
     }
     if (y + g_scroll[SCR_LIB] < L_listTop) {
-        int pw = S(62), px2 = W - S(44) - pw, px1 = px2 - S(6) - pw;
-        if (x >= W - S(44)) { go(SCR_SET); return; }
-        if (g_fileCount > 0 && x >= px1 - S(4)) {
+        if (in_rect(&g_hit[4], x, y)) { go(SCR_SET); return; }
+        if (in_rect(&g_hit[2], x, y) || in_rect(&g_hit[3], x, y)) {
+            int shuffle = in_rect(&g_hit[3], x, y);
+            if (g_fileCount <= 0) return;
             g_errorStreak = 0;
-            if (x < px2 - S(3)) {
-                if (g_set.order == 1) g_set.order = 0;
-                g_curIndex = -1;
-                play_index(0, 0);
-            } else {
-                g_set.order = 1;
-                g_curIndex = -1;
-                play_index(next_index(1, 0), 0);
-            }
+            set_queue_for_view();
+            g_set.order = shuffle ? 1 : (g_set.order == 1 ? 0 : g_set.order);
+            g_curIndex = -1;
+            play_index(shuffle ? next_index(1, 0) : q_at(0), 0);
             save_settings();
+            return;
         }
+        if (g_libMode == LIB_INSIDE) { if (in_rect(&g_hit[0], x, y)) lib_back(); return; }
+        if (in_rect(&g_hit[0], x, y) && g_libMode != LIB_SONGS) set_lib_mode(LIB_SONGS);
+        else if (in_rect(&g_hit[1], x, y) && g_libMode != LIB_FOLDERS) set_lib_mode(LIB_FOLDERS);
         return;
     }
-    {
-        int r = lib_row_at(x, y);
-        if (r >= 0) {
-            g_errorStreak = 0;
-            if (r == g_curIndex && get_status().state != 0) go(SCR_NOW);
-            else play_index(r, 0);
-        }
-    }
+    lib_play_row(lib_row_at(x, y));
 }
 
 static void tap_now(int x, int y)
@@ -1771,11 +1973,14 @@ static int on_key(WPARAM k)
     case VK_RIGHT: act_next(); return 1;
     case VK_UP:
     case VK_DOWN:
-        if (g_scr == SCR_LIB && g_fileCount > 0) {
-            if (g_sel < 0 || !g_selVisible) g_sel = g_curIndex >= 0 ? g_curIndex : (g_sel >= 0 ? g_sel : 0);
-            else g_sel += (k == VK_DOWN) ? 1 : -1;
+        if (g_scr == SCR_LIB && lib_count() > 0) {
+            if (g_sel < 0 || !g_selVisible) {
+                int r = (g_libMode == LIB_SONGS) ? g_curIndex : -1, i;
+                if (g_libMode == LIB_INSIDE) for (i = 0; i < lib_count(); i++) if (lib_file(i) == g_curIndex) r = i;
+                if (g_sel < 0) g_sel = r >= 0 ? r : (g_scroll[SCR_LIB] - L_listTop + L_rowH - 1) / L_rowH;
+            } else g_sel += (k == VK_DOWN) ? 1 : -1;
             if (g_sel < 0) g_sel = 0;
-            if (g_sel >= g_fileCount) g_sel = g_fileCount - 1;
+            if (g_sel >= lib_count()) g_sel = lib_count() - 1;
             g_selVisible = 1;
             ensure_visible(g_sel);
             redraw();
@@ -1786,7 +1991,8 @@ static int on_key(WPARAM k)
         }
         return 1;
     case VK_RETURN:
-        if (g_scr == SCR_LIB && g_selVisible && g_sel >= 0 && g_sel != g_curIndex) { g_errorStreak = 0; play_index(g_sel, 0); }
+        if (g_scr == SCR_LIB && g_selVisible && g_sel >= 0 &&
+            (g_libMode == LIB_FOLDERS || lib_file(g_sel) != g_curIndex)) lib_play_row(g_sel);
         else act_playpause();
         return 1;
     case VK_F1:            /* 왼쪽 소프트키: 보관함 ↔ 재생 화면 */
@@ -1798,6 +2004,7 @@ static int on_key(WPARAM k)
     case VK_ESCAPE:
     case VK_BACK:
         if (g_scr != SCR_LIB) { go(SCR_LIB); return 1; }
+        if (g_libMode == LIB_INSIDE) { lib_back(); return 1; }
         return 0;
     }
     return 0;
@@ -1953,11 +2160,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
 
     if (!load_list()) { scan_all(); save_list(); }
     build_names();
+    g_libMode = (g_set.panel == LIB_FOLDERS) ? LIB_FOLDERS : LIB_SONGS;
+    build_folders();
     if (g_set.lastIndex < 0 || g_set.lastIndex >= g_fileCount) { g_set.lastIndex = 0; g_set.lastPosMs = 0; }
-    g_sel = g_fileCount > 0 ? g_set.lastIndex : -1;
+    g_sel = (g_fileCount > 0 && g_libMode == LIB_SONGS) ? g_set.lastIndex : -1;
     g_busy = 0;
     layout();
     ensure_visible(g_sel);
+    g_sel = -1;
     redraw();
 
     g_audioThread = CreateThread(NULL, 0, audio_thread, NULL, 0, &tid);

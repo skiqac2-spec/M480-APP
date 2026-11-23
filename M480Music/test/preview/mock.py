@@ -67,38 +67,48 @@ SONGS=[("달빛 밴드","밤 산책"),("Coldplay","Viva La Vida"),("Daft Punk","
 COVER=Image.open(sys.argv[2]) if len(sys.argv)>2 else None
 CUR=0
 
-def lib(g,playing=True,press=-1,scroll=0):
-    rowH,miniH,top=40,50,46; bot=H-miniH; art_=rowH-10
-    g.fill(0,0,W,H,C_BG); hy=-scroll
-    if hy+top>0:
-        pw,ph=62,28; py=hy+9; px2=W-44-pw; px1=px2-6-pw
-        g.text("보관함",14,hy+4,px1-14,38,fTitle,C_TEXT)
-        g.rrect(px1,py,pw,ph,14,C_CARD); g.rrect(px2,py,pw,ph,14,C_CARD)
-        t=g.tw("재생",fBold); icon_play(g,px1+pw/2-t/2-6,py+ph/2,10,C_ACCENT); g.text("재생",px1+pw/2-t/2+3,py,t+4,ph,fBold,C_ACCENT)
-        t=g.tw("셔플",fBold); icon_shuffle(g,px2+pw/2-t/2-8,py+ph/2,C_ACCENT); g.text("셔플",px2+pw/2-t/2+5,py,t+4,ph,fBold,C_ACCENT)
-        icon_dots(g,W-22,py+ph/2,C_ACCENT)
-    for i,(a,t) in enumerate(SONGS):
-        ry=top+i*rowH-scroll
-        if ry>=bot: break
-        if ry+rowH<=0: continue
-        bg=C_PRESS if i==press else C_BG
-        g.fill(0,ry,W,rowH,bg)
-        art(g,t,a,12,ry+5,art_,0,COVER if i==CUR else None)
-        if i==CUR:
-            for k,hh in enumerate((6,9,7)):
-                s_=art_; bw=s_//8; gap=s_//12; x0=12+(s_-(bw*3+gap*2))//2; base=ry+5+s_*3//4; hh=s_*hh//20
-                g.fill(x0+k*(bw+gap),base-hh,bw,hh,(255,255,255))
-        g.text(t,12+art_+10,ry+3,W-art_-34,19,fBold,C_ACCENT if i==CUR else C_TEXT)
-        g.text(a,12+art_+10,ry+20,W-art_-34,16,fSmall,C_SUB)
-        g.fill(12+art_+10,ry+rowH-1,W,1,C_SEP)
-    g.rrect(W-4,(bot-60)*scroll//200,3,60,1,(70,70,78))
-    my=H-miniH; a=miniH-14
+FOLDERS=[("Albums","12곡"),("Ballad","8곡"),("Night Drive","2곡"),("OST","21곡"),("Pop","34곡"),("밴드","15곡"),("Rock","9곡")]
+def header(g,mode,cy=23):
+    pcx,scx=W-94,W-58
+    if mode==2:
+        g.lines([(16+4,cy-8),(16-4,cy),(16+4,cy+8)],3,C_ACCENT)
+        g.text("Night Drive",30,4,pcx-15-36,22,fHead,C_TEXT); g.text("2곡",30,25,100,16,fSmall,C_SUB)
+    else:
+        x=12
+        for k,t in enumerate(["노래","폴더"]):
+            tw=g.tw(t,fHead)+24; on=(mode==k)
+            g.rrect(x,cy-15,tw,30,15,(245,245,248) if on else C_CARD); g.text(t,x,cy-15,tw,30,fHead,C_BG if on else C_SUB,"C"); x+=tw+6
+    g.circle(pcx,cy,15,C_CARD); icon_play(g,pcx+1,cy,12,C_ACCENT)
+    g.circle(scx,cy,15,C_CARD); icon_shuffle(g,scx,cy,C_ACCENT); icon_dots(g,W-22,cy,C_ACCENT)
+
+def mini(g,playing=True):
+    miniH=50; my=H-miniH; a=miniH-14
     g.fill(0,my,W,miniH,C_MINI); g.fill(0,my,W,2,(55,55,60)); g.fill(0,my,W*35//100,2,C_ACCENT)
     art(g,"밤 산책","달빛 밴드",10,my+8,a,0,COVER)
     g.text("밤 산책",10+a+10,my+6,W-a-110,20,fBold,C_TEXT); g.text("달빛 밴드",10+a+10,my+25,W-a-110,16,fSmall,C_SUB)
     (icon_pause if playing else icon_play)(g,W-66,my+miniH/2,18,C_TEXT); icon_skip(g,W-24,my+miniH/2,16,1,C_TEXT)
 
-def lib2(g): lib(g,scroll=120,press=6)
+def rows(g,items,folder=False,cur=-1):
+    rowH,top=40,46; bot=H-50; art_=rowH-10
+    for i,(t,a) in enumerate(items):
+        ry=top+i*rowH
+        if ry>=bot: break
+        if folder:
+            p=PAL[hsh(t)&7]; g.grad(12,ry+5,art_,art_,p[0],p[1]); x,y,s_=12,ry+5,art_
+            g.rrect(x+s_*22/100,y+s_*30/100,s_*26/100,s_*14/100,2,(255,255,255)); g.rrect(x+s_*22/100,y+s_*37/100,s_*56/100,s_*38/100,2,(255,255,255))
+            g.lines([(W-18-3,ry+rowH/2-5),(W-18+2,ry+rowH/2),(W-18-3,ry+rowH/2+5)],2,C_DIM)
+        else:
+            art(g,t,a,12,ry+5,art_,0,COVER if i==cur else None)
+        g.text(t,12+art_+10,ry+3,W-art_-40,19,fBold,C_ACCENT if i==cur else C_TEXT)
+        g.text(a,12+art_+10,ry+20,W-art_-40,16,fSmall,C_SUB)
+        g.fill(12+art_+10,ry+rowH-1,W,1,C_SEP)
+
+def lib(g):
+    g.fill(0,0,W,H,C_BG); rows(g,[(t,a) for a,t in SONGS],cur=0); header(g,0); mini(g)
+def libf(g):
+    g.fill(0,0,W,H,C_BG); rows(g,FOLDERS,folder=True); header(g,1); mini(g)
+def libin(g):
+    g.fill(0,0,W,H,C_BG); rows(g,[("01 City Lights","Night Drive"),("02 Highway","Night Drive")]); header(g,2); mini(g)
 
 def now(g,playing=True):
     tint=(150,110,90) if COVER else PAL[3][1]
@@ -142,7 +152,7 @@ def settings(g):
 
 out=sys.argv[1]
 shots=[]
-for fn in (lib,lib2,now,settings):
+for fn in (lib,libf,libin,now):
     g=G(); fn(g); shots.append(g.im.resize((W,H),Image.LANCZOS))
 # 실제 크기 3장 + 2배 확대본
 sheet=Image.new("RGB",(W*2*2+30,H*2*2+30),(255,255,255))
