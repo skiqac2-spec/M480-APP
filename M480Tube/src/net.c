@@ -738,8 +738,9 @@ static void body_put(HttpResp *r, const void *d, int n)
 }
 #define BODYLEN(r) ((r)->sink ? (r)->streamed : (long)(r)->body.len)
 
-static int read_body(Conn *c, HttpResp *r, int chunked, long clen, NetCtl *ctl, int maxbytes)
+static int read_body(Conn *c, HttpResp *r, int chunked, long clen, NetCtl *ctl, int maxbytes, int *complete)
 {
+	*complete = 0;
 	if (chunked) {
 		Buf line;
 		buf_init(&line);
@@ -748,7 +749,12 @@ static int read_body(Conn *c, HttpResp *r, int chunked, long clen, NetCtl *ctl, 
 			if (!conn_readline(c, &line)) break;
 			if (line.len == 0) continue;
 			sz = strtol(line.p, NULL, 16);
-			if (sz <= 0) break;
+			if (sz <= 0) {
+				/* last chunk: consume trailers up to the blank line */
+				while (conn_readline(c, &line) && line.len > 0) {}
+				*complete = 1;
+				break;
+			}
 			while (sz > 0) {
 				int take;
 				if (c->rpos >= c->rlen && !conn_fill(c)) { buf_free(&line); return BODYLEN(r) > 0; }
@@ -777,7 +783,49 @@ static int read_body(Conn *c, HttpResp *r, int chunked, long clen, NetCtl *ctl, 
 		if (ctl && ctl->abort) return 0;
 		if (!r->sink && r->body.len > maxbytes) { strcpy(r->err, "파일이 너무 큼"); return 0; }
 	}
+	if (clen >= 0 && BODYLEN(r) >= clen) *complete = 1;
 	return 1;
+}
+
+/* ---- keep-alive pool: idle connections for reuse (saves TCP + TLS setup) ---- */
+#define POOL_N 4
+typedef struct { Conn *c; char host[128]; int port, tls; DWORD t; } PoolEnt;
+static PoolEnt g_pool[POOL_N];
+
+static Conn *pool_take(const Url *u)
+{
+	int i, tls = !strcmp(u->scheme, "https");
+	Conn *c = NULL;
+	DWORD now = GetTickCount();
+	EnterCriticalSection(&g_cs);
+	for (i = 0; i < POOL_N; i++) {
+		PoolEnt *e = &g_pool[i];
+		if (!e->c) continue;
+		if (now - e->t > 45000) { conn_close(e->c); free(e->c); e->c = NULL; continue; } /* server likely closed it */
+		if (!c && e->port == u->port && e->tls == tls && strieq(e->host, u->host)) { c = e->c; e->c = NULL; }
+	}
+	LeaveCriticalSection(&g_cs);
+	return c;
+}
+
+static void pool_put(Conn *c, const Url *u)
+{
+	int i, slot = -1;
+	DWORD oldest = 0, now = GetTickCount();
+	if (strlen(u->host) >= sizeof g_pool[0].host) { conn_close(c); free(c); return; }
+	c->ctl = NULL;
+	EnterCriticalSection(&g_cs);
+	for (i = 0; i < POOL_N; i++) {
+		if (!g_pool[i].c) { slot = i; break; }
+		if (now - g_pool[i].t >= oldest) { oldest = now - g_pool[i].t; slot = i; }
+	}
+	if (g_pool[slot].c) { conn_close(g_pool[slot].c); free(g_pool[slot].c); }
+	g_pool[slot].c = c;
+	strcpy(g_pool[slot].host, u->host);
+	g_pool[slot].port = u->port;
+	g_pool[slot].tls = !strcmp(u->scheme, "https");
+	g_pool[slot].t = now;
+	LeaveCriticalSection(&g_cs);
 }
 
 static int do_one(const char *url, const char *method, const char *body, int bodylen, const char *ctype,
@@ -786,17 +834,28 @@ static int do_one(const char *url, const char *method, const char *body, int bod
 	Url u;
 	Conn *c;
 	Buf req, line;
-	int chunked = 0, ok = 0;
+	int chunked = 0, ok = 0, reused = 0, keep = 0, closehdr = 0, http10 = 0, complete = 0, attempt;
 	long clen = -1;
 	char *cenc = NULL;
 	*location = NULL;
 	if (!url_parse(url, &u)) { _snprintf(r->err, sizeof r->err, "잘못된 주소: %.180s", url); return 0; }
 	if (strcmp(u.scheme, "http") && strcmp(u.scheme, "https")) { strcpy(r->err, "지원하지 않는 주소 형식"); url_free(&u); return 0; }
-	c = (Conn *)malloc(sizeof(Conn));
-	if (!c) { strcpy(r->err, "메모리 부족"); url_free(&u); return 0; }
-	if (!conn_open(c, &u, ctl, r)) { free(c); url_free(&u); return 0; }
-
 	buf_init(&req);
+	buf_init(&line);
+	c = NULL;
+for (attempt = 0; attempt < 2; attempt++) {
+	c = attempt == 0 ? pool_take(&u) : NULL;
+	if (c) {
+		reused = 1;
+		c->ctl = ctl;
+		if (ctl) ctl->sock = (unsigned int)c->s;
+	} else {
+		reused = 0;
+		c = (Conn *)malloc(sizeof(Conn));
+		if (!c) { strcpy(r->err, "메모리 부족"); buf_free(&req); buf_free(&line); url_free(&u); return 0; }
+		if (!conn_open(c, &u, ctl, r)) { free(c); buf_free(&req); buf_free(&line); url_free(&u); return 0; }
+	}
+	req.len = 0;
 	buf_addf(&req, "%s %s HTTP/1.1\r\n", method, u.path);
 	if ((u.port == 443 && !strcmp(u.scheme, "https")) || (u.port == 80 && !strcmp(u.scheme, "http")))
 		buf_addf(&req, "Host: %s\r\n", u.host);
@@ -805,7 +864,7 @@ static int do_one(const char *url, const char *method, const char *body, int bod
 	buf_adds(&req, "Accept: text/html,application/xhtml+xml,text/plain;q=0.9,image/png,image/jpeg,image/gif;q=0.8,*/*;q=0.5\r\n");
 	buf_adds(&req, "Accept-Language: ko-KR,ko;q=0.9,en;q=0.5\r\n");
 	buf_adds(&req, "Accept-Encoding: gzip, deflate\r\n");
-	buf_adds(&req, "Connection: close\r\n");
+	buf_adds(&req, "Connection: keep-alive\r\n");
 	if (referer && (strnieq(referer, "http:", 5) || strnieq(referer, "https:", 6))) {
 		/* don't leak https referer to http */
 		if (!(strnieq(referer, "https:", 6) && !strcmp(u.scheme, "http"))) {
@@ -824,20 +883,22 @@ static int do_one(const char *url, const char *method, const char *body, int bod
 	}
 	buf_adds(&req, "\r\n");
 	if (!conn_write(c, req.p, req.len) || (body && bodylen && !conn_write(c, body, bodylen)) || !conn_flush(c)) {
+		if (reused && !(ctl && ctl->abort)) { conn_close(c); free(c); c = NULL; continue; } /* stale: reconnect */
 		if (c->tls) tls_fail(c, r, &u);
 		else if (!r->err[0]) strcpy(r->err, ctl && ctl->abort ? "취소됨" : "요청 전송 실패");
 		goto done;
 	}
-	buf_free(&req);
-
 	/* status line */
-	buf_init(&line);
 	if (!conn_readline(c, &line) || strncmp(line.p, "HTTP/", 5) != 0) {
+		if (reused && !(ctl && ctl->abort)) { conn_close(c); free(c); c = NULL; continue; }
 		if (c->tls && br_ssl_engine_last_error(&c->sc.eng)) tls_fail(c, r, &u);
 		else if (!r->err[0]) strcpy(r->err, ctl && ctl->abort ? "취소됨" : "서버 응답 없음");
-		buf_free(&line);
 		goto done;
 	}
+	break;
+}
+	if (!c) { if (!r->err[0]) strcpy(r->err, "서버 응답 없음"); goto done; }
+	if (!strncmp(line.p, "HTTP/1.0", 8)) http10 = 1;
 	{
 		const char *sp = strchr(line.p, ' ');
 		r->status = sp ? atoi(sp + 1) : 0;
@@ -895,24 +956,35 @@ static int do_one(const char *url, const char *method, const char *body, int bod
 		else if (strieq(line.p, "refresh")) { free(r->refresh); r->refresh = xstrdup(v); }
 		else if (strieq(line.p, "content-disposition")) { free(r->disposition); r->disposition = xstrdup(v); }
 		else if (strieq(line.p, "date")) r->date = parse_http_date(v);
+		else if (strieq(line.p, "connection")) { if (stristr(v, "close")) closehdr = 1; }
 	}
-	buf_free(&line);
 	ok = 1;
-	if (strcmp(method, "HEAD") == 0 || r->status == 204 || r->status == 304 || (r->status >= 100 && r->status < 200)) goto done;
-	if (*location && r->status >= 300 && r->status < 400) goto done; /* skip body of redirects */
+	if (strcmp(method, "HEAD") == 0 || r->status == 204 || r->status == 304 || (r->status >= 100 && r->status < 200)) {
+		keep = 1;
+		goto done;
+	}
+	if (*location && r->status >= 300 && r->status < 400) goto done; /* skip body of redirects (connection is dropped) */
 	if (ctl && ctl->on_headers && r->status >= 200 && r->status < 300 && !cenc)
 		r->sink = ctl->on_headers(ctl->ctx, r);
-	if (!read_body(c, r, chunked, clen, ctl, maxbytes)) {
+	if (!read_body(c, r, chunked, clen, ctl, maxbytes, &complete)) {
 		if (ctl && ctl->abort) { strcpy(r->err, "취소됨"); ok = 0; }
 		else if (r->err[0]) ok = 0;
 	}
 	if (ok && r->sink && clen >= 0 && r->streamed < clen) { strcpy(r->err, "\xEB\x8B\xA4\xEC\x9A\xB4\xEB\xA1\x9C\xEB\x93\x9C\xEA\xB0\x80 \xEC\xA4\x91\xEA\xB0\x84\xEC\x97\x90 \xEB\x81\x8A\xEA\xB9\x80"); ok = 0; }
 	if (ok && cenc && !decompress(r, cenc)) { strcpy(r->err, "압축 해제 실패"); ok = 0; }
+	if (ok && complete) keep = 1;
 done:
 	buf_free(&req);
+	buf_free(&line);
 	free(cenc);
-	conn_close(c);
-	free(c);
+	if (c) {
+		/* reuse only a cleanly finished response with nothing left over */
+		if (keep && ok && !closehdr && !http10 && !(ctl && ctl->abort) && c->rpos >= c->rlen && !c->eof) {
+			if (ctl) ctl->sock = (unsigned int)INVALID_SOCKET;
+			pool_put(c, &u);
+		}
+		else { conn_close(c); free(c); }
+	}
 	url_free(&u);
 	return ok;
 }

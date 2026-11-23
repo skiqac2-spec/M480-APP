@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.5"
+#define VERSION   "2.6"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -645,7 +645,12 @@ static DWORD WINAPI thumb_thread(LPVOID arg)
 		/* most recently wanted first (= what is on screen now) */
 		for (i = 0; i < TMAX; i++)
 			if (g_tc[i].st == 3 && (k < 0 || g_tc[i].used > newest)) { k = i; newest = g_tc[i].used; }
-		if (k >= 0) { strcpy(id, g_tc[k].id); g_tc[k].st = 1; }
+		if (k >= 0) {
+			strcpy(id, g_tc[k].id);
+			g_tc[k].st = 1;
+			/* more waiting: wake the other loader too */
+			for (i = 0; i < TMAX; i++) if (g_tc[i].st == 3) { SetEvent(g_thumb_ev); break; }
+		}
 		tw = g_tw; th = g_th;
 		LeaveCriticalSection(&g_lcs);
 		if (k < 0) { WaitForSingleObject(g_thumb_ev, 2000); continue; }
@@ -655,7 +660,8 @@ static DWORD WINAPI thumb_thread(LPVOID arg)
 			NetCtl ctl;
 			unsigned short *px = NULL;
 			memset(&ctl, 0, sizeof ctl);
-			_snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/mqdefault.jpg", id);
+			/* list rows only need 96x54: the 120x90 'default' image is ~4x smaller to fetch and decode */
+			_snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/%s", id, tw <= 120 ? "default.jpg" : "mqdefault.jpg");
 			if (http_request(url, "GET", NULL, 0, NULL, NULL, &r, &ctl, 300000) && r.status == 200 && r.body.len > 0)
 				px = thumb_decode((const unsigned char *)r.body.p, r.body.len, tw, th);
 			http_resp_free(&r);
@@ -2092,6 +2098,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE hp, LPWSTR cmd, int show)
 	set_thumb_size();
 	ShowWindow(g_hwnd, show);
 	UpdateWindow(g_hwnd);
+	/* two loaders: hides network latency */
+	th = CreateThread(NULL, 0x20000, thumb_thread, NULL, THREAD_FLAGS, NULL);
+	if (th) CloseHandle(th);
 	th = CreateThread(NULL, 0x20000, thumb_thread, NULL, THREAD_FLAGS, NULL);
 	if (th) CloseHandle(th);
 	start_config_update(0);
