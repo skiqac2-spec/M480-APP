@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.7"
+#define VERSION   "2.8"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -29,6 +29,7 @@ unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th)
 #define WM_APP_STREAMS  (WM_APP + 3)
 #define WM_APP_CONFIG   (WM_APP + 4)
 #define WM_APP_PROGRESS (WM_APP + 5)
+#define WM_APP_PART     (WM_APP + 6)
 
 #define ID_EDIT 100
 #define TM_PLAYER 1
@@ -107,7 +108,7 @@ static volatile int g_quit;
 #define MORE_H 44
 
 /* subscriptions */
-typedef struct { char chid[32]; char *name; } Sub;
+typedef struct { char chid[32]; char *name; DWORD fetched; } Sub;
 static Sub *g_subs;
 static int g_nsubs;
 static int g_subs_loaded_once;
@@ -703,44 +704,64 @@ static int cmp_pub(const void *a, const void *b)
 	return x->pub < y->pub ? 1 : x->pub > y->pub ? -1 : 0;
 }
 
+/* one channel's newest uploads, handed to the UI thread as soon as it arrives */
+typedef struct { int uid; char chid[32]; YtList items; } FeedPart;
+
+typedef struct { Job *j; volatile LONG next, done, fails; } FeedRun;
+
+#define FEED_WORKERS 3
+static DWORD WINAPI feed_worker(LPVOID arg)
+{
+	FeedRun *fr = (FeedRun *)arg;
+	Job *j = fr->j;
+	NetCtl ctl;
+	memset(&ctl, 0, sizeof ctl);
+	for (;;) {
+		int i = (int)InterlockedIncrement((LONG *)&fr->next) - 1, k;
+		FeedPart *part;
+		char *nm = NULL;
+		if (i >= j->nsubs || g_quit) break;
+		part = (FeedPart *)calloc(1, sizeof(FeedPart));
+		part->uid = j->uid;
+		strcpy(part->chid, j->subs[i].chid);
+		if (!yt_rss(j->subs[i].chid, &part->items, &nm, &ctl)) {
+			/* feed unavailable: fall back to the channel page */
+			yt_list_free(&part->items);
+			memset(&part->items, 0, sizeof part->items);
+			if (!yt_channel(j->subs[i].chid, NULL, &part->items, &nm, &ctl)) InterlockedIncrement((LONG *)&fr->fails);
+		}
+		for (k = 0; k < part->items.n; k++) {
+			YtItem *it = &part->items.items[k];
+			if (!it->chid[0]) strncpy(it->chid, j->subs[i].chid, sizeof it->chid - 1);
+			if (!it->channel) it->channel = xstrdup(nm ? nm : (j->subs[i].name ? j->subs[i].name : ""));
+		}
+		free(nm);
+		PostMessageW(g_hwnd, WM_APP_PART, 0, (LPARAM)part);
+		PostMessageW(g_hwnd, WM_APP_PROGRESS, (WPARAM)InterlockedIncrement((LONG *)&fr->done), j->nsubs);
+	}
+	return 0;
+}
+
 static DWORD WINAPI job_thread(LPVOID arg)
 {
 	Job *j = (Job *)arg;
 	if (j->type == J_SEARCH) j->ok = yt_search(j->query, j->cont, &j->res, &j->ctl);
 	else if (j->type == J_CHANNEL) j->ok = yt_channel(j->chid, j->cont, &j->res, &j->name, &j->ctl);
 	else {
-		int i, fails = 0;
-		for (i = 0; i < j->nsubs && !g_quit; i++) {
-			YtList one;
-			char *nm = NULL;
-			int k;
-			memset(&one, 0, sizeof one);
-			PostMessageW(g_hwnd, WM_APP_PROGRESS, i + 1, j->nsubs);
-			if (!yt_rss(j->subs[i].chid, &one, &nm, &j->ctl)) {
-				/* feed unavailable: fall back to the channel page */
-				yt_list_free(&one);
-				memset(&one, 0, sizeof one);
-				if (!yt_channel(j->subs[i].chid, NULL, &one, &nm, &j->ctl)) fails++;
-			}
-			for (k = 0; k < one.n && j->res.n < 600; k++) {
-				YtItem *it;
-				int d, dup = 0;
-				for (d = 0; d < j->res.n; d++) if (!strcmp(j->res.items[d].id, one.items[k].id)) { dup = 1; break; }
-				if (dup) continue;
-				j->res.items = (YtItem *)realloc(j->res.items, (j->res.n + 1) * sizeof(YtItem));
-				it = &j->res.items[j->res.n++];
-				*it = one.items[k];
-				memset(&one.items[k], 0, sizeof one.items[k]);
-				if (!it->chid[0]) strncpy(it->chid, j->subs[i].chid, sizeof it->chid - 1);
-				if (!it->channel) it->channel = xstrdup(nm ? nm : (j->subs[i].name ? j->subs[i].name : ""));
-			}
-			free(nm);
-			yt_list_free(&one);
+		/* subscriptions: several channels at once (each keeps its own connection) */
+		FeedRun fr;
+		HANDLE th[FEED_WORKERS];
+		int i, n = 0;
+		memset(&fr, 0, sizeof fr);
+		fr.j = j;
+		for (i = 0; i < FEED_WORKERS && i < j->nsubs; i++) {
+			th[n] = CreateThread(NULL, 0x20000, feed_worker, &fr, THREAD_FLAGS, NULL);
+			if (th[n]) n++;
 		}
-		if (j->res.n > 1) qsort(j->res.items, j->res.n, sizeof(YtItem), cmp_pub);
-		j->ok = j->res.n > 0;
-		if (fails) _snprintf(j->err, sizeof j->err, "채널 %d개를 불러오지 못했습니다", fails);
-		else if (!j->ok) strcpy(j->err, "구독한 채널에 영상이 없습니다");
+		if (!n) feed_worker(&fr);
+		for (i = 0; i < n; i++) { WaitForSingleObject(th[i], INFINITE); CloseHandle(th[i]); }
+		j->ok = 1;
+		if (fr.fails) _snprintf(j->err, sizeof j->err, "채널 %d개를 불러오지 못했습니다", (int)fr.fails);
 	}
 	PostMessageW(g_hwnd, WM_APP_JOB, 0, (LPARAM)j);
 	return 0;
@@ -823,13 +844,127 @@ static void refresh_subs(void)
 	j->type = J_SUBS;
 	j->uid = v->uid;
 	j->subs = (Sub *)calloc(g_nsubs, sizeof(Sub));
-	for (i = 0; i < g_nsubs; i++) { j->subs[i] = g_subs[i]; j->subs[i].name = xstrdup(g_subs[i].name); }
-	j->nsubs = g_nsubs;
-	v->busy = 1;
+	{
+		/* YouTube refreshes these feeds every 15 minutes: channels fetched more
+		   recently than that would only return what we already have */
+		DWORD now = GetTickCount();
+		for (i = 0; i < g_nsubs; i++) {
+			if (g_subs[i].fetched && now - g_subs[i].fetched < 15 * 60 * 1000) continue;
+			j->subs[j->nsubs] = g_subs[i];
+			j->subs[j->nsubs].name = xstrdup(g_subs[i].name);
+			j->nsubs++;
+		}
+	}
 	g_subs_loaded_once = 1;
+	if (!j->nsubs) {
+		job_free(j);
+		status_set("이미 최신 상태입니다 (15분마다 새로 받을 수 있어요)");
+		InvalidateRect(g_hwnd, NULL, FALSE);
+		return;
+	}
+	v->busy = 1;
 	status_set("구독 피드를 불러오는 중...");
 	if (!job_start(j)) { v->busy = 0; job_free(j); }
 	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+/* ---- subscription feed cache (shown immediately at start-up) ---- */
+#define FEED_MAX 400
+static void feed_save(void)
+{
+	WCHAR p[MAX_PATH];
+	FILE *f;
+	int i;
+	app_path(p, L"m480tube_feed.txt");
+	f = _wfopen(p, L"wb");
+	if (!f) return;
+	EnterCriticalSection(&g_lcs);
+	for (i = 0; i < g_vsubs.list.n; i++) {
+		YtItem *it = &g_vsubs.list.items[i];
+		fprintf(f, "%ld\t", it->pub);
+		hist_field(f, it->id);
+		hist_field(f, it->chid);
+		hist_field(f, it->title);
+		hist_field(f, it->channel);
+		hist_field(f, it->length);
+		hist_field(f, it->meta);
+		fputs("\r\n", f);
+	}
+	LeaveCriticalSection(&g_lcs);
+	fclose(f);
+}
+
+static void feed_load(void)
+{
+	WCHAR p[MAX_PATH];
+	FILE *f;
+	char line[1200];
+	app_path(p, L"m480tube_feed.txt");
+	f = _wfopen(p, L"rb");
+	if (!f) return;
+	while (fgets(line, sizeof line, f) && g_vsubs.list.n < FEED_MAX) {
+		char *fld[7], *s = line;
+		int n = 0;
+		YtItem *it;
+		while (n < 7) {
+			char *t = strchr(s, '\t');
+			if (!t) break;
+			*t = 0;
+			fld[n++] = s;
+			s = t + 1;
+		}
+		if (n < 4 || !fld[1][0] || strlen(fld[1]) > 15) continue;
+		if (sub_index(fld[2]) < 0) continue;   /* channel no longer subscribed */
+		g_vsubs.list.items = (YtItem *)realloc(g_vsubs.list.items, (g_vsubs.list.n + 1) * sizeof(YtItem));
+		it = &g_vsubs.list.items[g_vsubs.list.n++];
+		memset(it, 0, sizeof *it);
+		it->pub = atol(fld[0]);
+		strcpy(it->id, fld[1]);
+		strncpy(it->chid, fld[2], sizeof it->chid - 1);
+		it->title = xstrdup(fld[3]);
+		if (n > 4 && fld[4][0]) it->channel = xstrdup(fld[4]);
+		if (n > 5 && fld[5][0]) it->length = xstrdup(fld[5]);
+		if (n > 6 && fld[6][0]) it->meta = xstrdup(fld[6]);
+	}
+	fclose(f);
+}
+
+static void free_item(YtItem *it)
+{
+	free(it->title); free(it->channel); free(it->length); free(it->meta);
+}
+
+/* merge one channel's uploads into the subscription feed: new videos are added,
+   ones already in the list are skipped, newest first */
+static void on_feed_part(FeedPart *part)
+{
+	View *v = view_by_uid(part->uid);
+	int i, k, si = sub_index(part->chid);
+	if (si >= 0) g_subs[si].fetched = GetTickCount();
+	if (v && si >= 0) {
+		EnterCriticalSection(&g_lcs);
+		v->list.items = (YtItem *)realloc(v->list.items, (v->list.n + part->items.n + 1) * sizeof(YtItem));
+		for (i = 0; i < part->items.n; i++) {
+			YtItem *it = &part->items.items[i];
+			for (k = 0; k < v->list.n; k++) if (!strcmp(v->list.items[k].id, it->id)) break;
+			if (k < v->list.n) {
+				/* already listed: refresh the view count / date text only */
+				if (it->meta) { free(v->list.items[k].meta); v->list.items[k].meta = it->meta; it->meta = NULL; }
+				if (it->pub) v->list.items[k].pub = it->pub;
+				free_item(it);
+				continue;
+			}
+			v->list.items[v->list.n++] = *it;
+		}
+		part->items.n = 0;
+		if (v->list.n > 1) qsort(v->list.items, v->list.n, sizeof(YtItem), cmp_pub);
+		while (v->list.n > FEED_MAX) free_item(&v->list.items[--v->list.n]);
+		v->msg[0] = 0;
+		LeaveCriticalSection(&g_lcs);
+		if (v == cur()) { clamp_scroll(); list_invalidate(); }
+	}
+	yt_list_free(&part->items);
+	free(part);
 }
 
 static void merge_results(View *v, YtList *res, int replace)
@@ -863,7 +998,13 @@ static void on_job(Job *j)
 	if (v) {
 		v->busy = v->busy_more = 0;
 		if (j->type == J_CHANNEL && j->name && !v->title) v->title = xstrdup(j->name);
-		if (!j->ok && !j->res.n) {
+		if (j->type == J_SUBS) {
+			char s[160];
+			feed_save();
+			if (!v->list.n) strcpy(v->msg, j->err[0] ? j->err : "구독한 채널에 영상이 없습니다");
+			_snprintf(s, sizeof s, "구독 채널 %d개 · 영상 %d개%s%s", g_nsubs, v->list.n, j->err[0] ? " · " : "", j->err);
+			if (v == cur()) { status_set(s); InvalidateRect(g_hwnd, NULL, FALSE); }
+		} else if (!j->ok && !j->res.n) {
 			const char *e = j->err[0] ? j->err : j->res.err[0] ? j->res.err : "불러오기 실패";
 			if (!v->list.n) strncpy(v->msg, e, sizeof v->msg - 1);
 			if (v == cur()) status_set(e);
@@ -930,6 +1071,14 @@ static void go_back(void)
 	InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
+static void scroll_top(void)
+{
+	KillTimer(g_hwnd, TM_KINETIC);
+	g_vel = 0;
+	cur()->scroll = 0;
+	list_invalidate();
+}
+
 static void set_tab(int t)
 {
 	while (g_nchan) go_back();
@@ -950,7 +1099,18 @@ static void toggle_sub(const char *chid, const char *name)
 		_snprintf(s, sizeof s, "구독함: %s", name ? name : chid);
 	}
 	subs_save();
-	g_subs_loaded_once = 0;   /* refresh the feed next time */
+	{
+		/* drop an unsubscribed channel's videos from the feed */
+		int i, k = 0;
+		EnterCriticalSection(&g_lcs);
+		for (i = 0; i < g_vsubs.list.n; i++) {
+			if (sub_index(g_vsubs.list.items[i].chid) < 0) free_item(&g_vsubs.list.items[i]);
+			else g_vsubs.list.items[k++] = g_vsubs.list.items[i];
+		}
+		g_vsubs.list.n = k;
+		LeaveCriticalSection(&g_lcs);
+	}
+	g_subs_loaded_once = 0;   /* refresh the feed next time (only new channels are fetched) */
 	status_set(s);
 	InvalidateRect(g_hwnd, NULL, FALSE);
 }
@@ -1606,10 +1766,11 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 			if (v->kind == V_CHANNEL) {
 				if (PtInRect(&a, pt)) go_back();
 				else if (PtInRect(&c, pt)) toggle_sub(v->chid, v->title);
+				else if (PtInRect(&b, pt)) scroll_top();   /* tap the channel name: back to the top */
 			} else {
-				if (PtInRect(&a, pt)) set_tab(2);
-				else if (PtInRect(&b, pt)) set_tab(0);
-				else if (PtInRect(&c, pt)) set_tab(1);
+				/* tapping the tab you are already on jumps back to the top */
+				int t = PtInRect(&a, pt) ? 2 : PtInRect(&b, pt) ? 0 : PtInRect(&c, pt) ? 1 : -1;
+				if (t >= 0) { if (t == g_tab) scroll_top(); else set_tab(t); }
 				else if (PtInRect(&d, pt) && g_tab == 1) refresh_subs();
 			}
 			return 0;
@@ -1765,6 +1926,9 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		break;
 	case WM_APP_JOB:
 		on_job((Job *)l);
+		return 0;
+	case WM_APP_PART:
+		on_feed_part((FeedPart *)l);
 		return 0;
 	case WM_APP_PROGRESS: {
 		char s[80];
@@ -2050,6 +2214,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE hp, LPWSTR cmd, int show)
 	g_vhist.kind = V_HIST;
 	g_vhist.uid = g_next_uid++;
 	hist_load();
+	feed_load();
 	g_tab = g_vhist.list.n ? 2 : 0;   /* open on the watch history when there is one */
 
 	memset(&lf, 0, sizeof lf);
