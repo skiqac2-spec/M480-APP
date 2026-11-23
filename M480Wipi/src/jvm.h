@@ -121,6 +121,7 @@ typedef struct Class {
     struct Class *hnext;
     const char *srcfile;
     void *jar;               /* where the class came from (for resources) */
+    int is_stub;             /* synthesized stand-in for a missing class */
 } Class;
 
 /* ---- threads ---- */
@@ -190,6 +191,9 @@ Field *cls_field(Class *c, const char *name, const char *desc);
 Field *cls_field_n(Class *c, const char *name);
 int cls_field_off(const char *cls, const char *name);
 Object *cls_mirror(Class *c);
+extern int cls_stub_enabled;
+extern char vm_last_error[256];
+Method *cls_stub_method(Class *k, const char *name, const char *desc, int is_static);
 void cls_set_finalizer(const char *cls, void (*fn)(Object *));
 void native_register(const char *cls, const char *name, const char *desc, NativeFn fn);
 NativeFn native_lookup(const char *cls, const char *name, const char *desc);

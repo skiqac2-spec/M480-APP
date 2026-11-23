@@ -278,7 +278,7 @@ static Field *resolve_field(Thread *t, Class *c, int idx)
     return e->v.field;
 }
 
-static Method *resolve_method(Thread *t, Class *c, int idx)
+static Method *resolve_method(Thread *t, Class *c, int idx, int is_static)
 {
     CP *e = &c->cp[idx];
     if (!(e->flags & CPF_RESOLVED)) {
@@ -292,6 +292,7 @@ static Method *resolve_method(Thread *t, Class *c, int idx)
         m = cls_method(k, n, d);
         if (!m) m = cls_imethod(k, n, d);
         if (!m && (k->acc & ACC_INTERFACE)) m = cls_method(C_Object, n, d);
+        if (!m) m = cls_stub_method(k, n, d, is_static);
         if (!m) {
             vm_log("no method %s.%s%s", k->name, n, d);
             throw_new(t, "java/lang/NoSuchMethodError", n);
@@ -600,7 +601,7 @@ next:
     case 0xb6: case 0xb7: case 0xb8: {
         Method *tm;
         SAVE();
-        tm = resolve_method(t, cls, U2(pc + 1));
+        tm = resolve_method(t, cls, U2(pc + 1), *pc == 0xb8);
         if (!tm) goto exception;
         if (*pc == 0xb8) {
             if (tm->cls->state != CS_INITED) {
@@ -649,7 +650,7 @@ next:
         Object *recv;
         if (!(e->flags & CPF_RESOLVED)) {
             SAVE();
-            if (!resolve_method(t, cls, U2(pc + 1))) goto exception;
+            if (!resolve_method(t, cls, U2(pc + 1), 0)) goto exception;
         }
         rm = e->v.method;
         recv = sp[-rm->nargs].l;

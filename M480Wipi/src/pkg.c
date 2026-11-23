@@ -125,7 +125,7 @@ static void apply_desc(Pkg *p)
     if ((v = get_prop(p, "Main-Class")) != NULL && !p->mainclass[0]) snprintf(p->mainclass, sizeof p->mainclass, "%s", v);
     if ((v = get_prop(p, "Name")) != NULL && !p->name[0]) snprintf(p->name, sizeof p->name, "%s", v);
     if ((v = get_prop(p, "MIDlet-Name")) != NULL && !p->name[0]) snprintf(p->name, sizeof p->name, "%s", v);
-    if ((v = get_prop(p, "DD-ProgName")) != NULL && !p->name[0]) snprintf(p->name, sizeof p->name, "%s", v);
+    if ((v = get_prop(p, "DD-ProgName")) != NULL && !p->id[0]) snprintf(p->id, sizeof p->id, "%s", v);
     if ((v = get_prop(p, "PID")) != NULL && !p->id[0]) snprintf(p->id, sizeof p->id, "%s", v);
     if ((v = get_prop(p, "AID")) != NULL && !p->id[0]) snprintf(p->id, sizeof p->id, "%s", v);
     if ((v = get_prop(p, "DisplaySize")) != NULL || (v = get_prop(p, "MIDxlet-ScreenSize")) != NULL || (v = get_prop(p, "LCD-Size")) != NULL) {

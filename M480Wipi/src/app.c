@@ -101,7 +101,11 @@ int app_start(const char *path, int carrier, int scr_w, int scr_h, const char *s
     vm_set_prop("CARRIER", carrier == CARRIER_SKT ? "SKT" : carrier == CARRIER_KTF ? "KTF" : "LGT");
     snprintf(tmp, sizeof tmp, "%d", scr_w); vm_set_prop("m.LCD_WIDTH", tmp);
     snprintf(tmp, sizeof tmp, "%d", scr_h); vm_set_prop("m.LCD_HEIGHT", tmp);
-    if (!find_main()) { snprintf(err, errmax, "시작 클래스(Jlet/MIDlet)를 찾지 못했습니다"); return 0; }
+    cls_stub_enabled = 1;
+    if (!find_main()) {
+        snprintf(err, errmax, "시작 클래스(Jlet/MIDlet)를 찾지 못했습니다.\n시작 클래스: %s\n%s", pkg.mainclass[0] ? pkg.mainclass : "(없음)", vm_last_error);
+        return 0;
+    }
     mc = cls_find(pkg.mainclass);
     jlet = cls_find("org/kwis/msp/lcdui/Jlet");
     vm_set_prop("m480.main", pkg.mainclass);

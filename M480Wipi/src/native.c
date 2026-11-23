@@ -81,8 +81,11 @@ static int n_cls_find0(Thread *t, Slot *a)
 {
     char buf[300];
     Class *c;
+    int st = cls_stub_enabled;
     str_to_utf8(a[0].l, buf, sizeof buf);
+    cls_stub_enabled = 0;            /* Class.forName must report missing classes honestly */
     c = cls_find(buf);
+    cls_stub_enabled = st;
     RET_L(c ? cls_mirror(c) : NULL);
 }
 static int n_cls_init0(Thread *t, Slot *a)

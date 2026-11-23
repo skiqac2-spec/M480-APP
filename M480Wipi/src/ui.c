@@ -517,31 +517,52 @@ static void draw_box(int x, int y, int w, int h, const char *title)
     text(x + 8, y + 4, title, F_BOLD, 0xFFFFFF);
 }
 
+/* carrier dialog geometry: everything stacked so nothing can overlap */
+static int dlg_x, dlg_y, dlg_w, dlg_h, dlg_rows_y, dlg_rowh;
+static void carrier_geom(void)
+{
+    dlg_rowh = font_height(F_ITEM) + 10;
+    if (dlg_rowh < 26) dlg_rowh = 26;
+    dlg_w = fw - 16;
+    dlg_h = 24 + (font_height(F_ITEM) + 8) + 4 * (dlg_rowh + 4) + 2 * (font_height(F_SMALL) + 4) + 10;
+    if (dlg_h > fh - 26) dlg_h = fh - 26;
+    dlg_x = 8;
+    dlg_y = (fh - 22 - dlg_h) / 2;
+    if (dlg_y < 2) dlg_y = 2;
+    dlg_rows_y = dlg_y + 24 + font_height(F_ITEM) + 8;
+}
 static void draw_carrier(void)
 {
-    static const char *names[3] = { "SKT  (SK-VM · WIPI)", "KTF  (WIPI)", "LGT  (WIPI)" };
-    int x = 10, y = 30, w = fw - 20, h = fh - 60, i;
+    static const char *names[3] = { "SKT (SK-VM/WIPI)", "KTF (WIPI)", "LGT (WIPI)" };
+    int i, x, w, iy;
     char line[200];
     Game *g = &games[sel];
     draw_list();
-    draw_box(x, y, w, h, "통신사 선택");
-    text_fit(x + 10, y + 30, w - 20, g->name, F_ITEM, 0xFFE080);
+    carrier_geom();
+    x = dlg_x; w = dlg_w;
+    draw_box(x, dlg_y, w, dlg_h, "통신사 선택");
+    text_fit(x + 10, dlg_y + 28, w - 20, g->name, F_ITEM, 0xFFE080);
     for (i = 0; i < 4; i++) {
-        int ry = y + 56 + i * 34, on = dlg_sel == i;
-        rect(x + 8, ry, w - 16, 30, on ? 0x3A68B0 : 0x232D3E);
+        int ry = dlg_rows_y + i * (dlg_rowh + 4), on = dlg_sel == i, ty = ry + (dlg_rowh - font_height(F_ITEM)) / 2;
+        rect(x + 6, ry, w - 12, dlg_rowh, on ? 0x3A68B0 : 0x232D3E);
         if (i < 3) {
-            rect(x + 14, ry + 9, 12, 12, carrier_col(i));
-            if (dlg_carrier == i) { rect(x + 17, ry + 12, 6, 6, 0xFFFFFF); }
-            text(x + 34, ry + 6, names[i], F_ITEM, 0xFFFFFF);
-            if (g->carrier == i) text_r(x + w - 14, ry + 9, "자동감지", F_SMALL, 0xA0E0A0);
+            int tagw = g->carrier == i ? text_w("자동", F_SMALL) + 10 : 0;
+            rect(x + 12, ry + dlg_rowh / 2 - 6, 12, 12, carrier_col(i));
+            if (dlg_carrier == i) rect(x + 15, ry + dlg_rowh / 2 - 3, 6, 6, 0xFFFFFF);
+            text_fit(x + 32, ty, w - 44 - tagw, names[i], F_ITEM, 0xFFFFFF);
+            if (tagw) {
+                rect(x + w - 12 - tagw, ry + 4, tagw, dlg_rowh - 8, 0x2E7D32);
+                text(x + w - 7 - tagw, ry + (dlg_rowh - font_height(F_SMALL)) / 2, "자동", F_SMALL, 0xFFFFFF);
+            }
         } else {
-            if (dlg_size == 0) snprintf(line, sizeof line, "화면 크기:  ◀ 자동 ▶");
-            else snprintf(line, sizeof line, "화면 크기:  ◀ %dx%d ▶", sizes[dlg_size][0], sizes[dlg_size][1]);
-            text(x + 14, ry + 6, line, F_ITEM, 0xFFFFFF);
+            if (dlg_size == 0) snprintf(line, sizeof line, "화면 크기: ◀ 자동 ▶");
+            else snprintf(line, sizeof line, "화면 크기: ◀ %dx%d ▶", sizes[dlg_size][0], sizes[dlg_size][1]);
+            text_fit(x + 12, ty, w - 24, line, F_ITEM, 0xFFFFFF);
         }
     }
-    text(x + 10, y + h - 46, g->carrier == dlg_carrier ? "확인 키를 누르면 시작합니다" : "자동감지와 다른 통신사를 골랐습니다", F_SMALL, 0xC0C8D0);
-    text(x + 10, y + h - 28, "키 코드·시스템 속성이 통신사에 맞춰집니다", F_SMALL, 0x8090A8);
+    iy = dlg_rows_y + 4 * (dlg_rowh + 4) + 2;
+    text_fit(x + 10, iy, w - 20, g->carrier == dlg_carrier ? "확인: 선택 / 왼쪽 소프트키: 시작" : "자동감지와 다른 통신사를 골랐습니다", F_SMALL, 0xC0C8D0);
+    text_fit(x + 10, iy + font_height(F_SMALL) + 4, w - 20, "통신사에 따라 키 코드가 바뀝니다", F_SMALL, 0x8090A8);
     soft_bar("시작", "취소");
 }
 
@@ -832,8 +853,10 @@ void ui_tap(int x, int y, int down, int drag)
         break;
     }
     case M_CARRIER: {
-        int ry = (y - 30 - 56) / 34;
-        if (y >= 86 && ry >= 0 && ry < 4) {
+        int ry;
+        carrier_geom();
+        ry = (y - dlg_rows_y) / (dlg_rowh + 4);
+        if (y >= dlg_rows_y && ry >= 0 && ry < 4) {
             if (ry < 3) { if (dlg_sel == ry && dlg_carrier == ry) start_game(); else { dlg_sel = ry; dlg_carrier = ry; } }
             else { dlg_sel = 3; dlg_size = (dlg_size + (x < fw / 2 ? NSIZES - 1 : 1)) % NSIZES; }
             need_draw = 1;

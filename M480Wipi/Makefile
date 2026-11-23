@@ -10,10 +10,14 @@ CE_SRC = $(CORE) src/pal_ce.c src/main_ce.c
 .PHONY: all rt host clean
 all: out/M480Wipi.exe
 
-out/M480Wipi.exe: $(CE_SRC) src/*.h
+out/res.o: res/m480wipi.rc res/m480wipi.ico
+	mkdir -p out
+	arm-mingw32ce-windres -I res res/m480wipi.rc -o $@
+
+out/M480Wipi.exe: $(CE_SRC) src/*.h out/res.o
 	mkdir -p out
 	$(CE_CC) -std=gnu99 -O2 -march=armv5te -mtune=arm1136j-s -fno-strict-aliasing -D_WIN32_WCE=0x502 -DUNDER_CE -DUNICODE -D_UNICODE \
-	  -Wall -Wno-unused-function -o $@ $(CE_SRC) -laygshell -lmmtimer -static-libgcc -lm
+	  -Wall -Wno-unused-function -o $@ $(CE_SRC) out/res.o -Wl,--major-subsystem-version=5,--minor-subsystem-version=2 -laygshell -lmmtimer -static-libgcc -lm
 	arm-mingw32ce-strip $@ || true
 
 rt:

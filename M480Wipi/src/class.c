@@ -3,6 +3,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+static Class *make_stub(const char *name, int iface);
+static int stubbable(const char *name);
+static Class *load_class(const char *name);
+static Class *tab_get(const char *name);
 Class *C_Object, *C_String, *C_Class, *C_Thread, *C_Throwable;
 int F_String_value, F_String_offset, F_String_count, F_Thread_eetop, F_Throwable_msg, F_Class_vm;
 
@@ -232,7 +236,7 @@ static Class *parse_class(const u8 *data, int len, void *jar)
         }
         if (m->max_locals < m->nargs) m->max_locals = m->nargs;
     }
-    if (r.err) { vm_log("bad classfile %s", c->name ? c->name : "?"); return NULL; }
+    if (r.err) { vm_log("bad classfile %s", c->name ? c->name : "?"); snprintf(vm_last_error, sizeof vm_last_error, "클래스 파일 손상: %s", c->name ? c->name : "?"); return NULL; }
     return c;
 }
 
@@ -243,12 +247,18 @@ static int link_class(Class *c)
     const char *sname = (const char *)c->super;
     if (sname) {
         c->super = cls_find_sym(sname);
-        if (!c->super) { vm_log("superclass %s of %s not found", sname, c->name); return 0; }
+        if (!c->super) {
+            vm_log("superclass %s of %s not found", sname, c->name);
+            snprintf(vm_last_error, sizeof vm_last_error, "%s 의 부모 클래스 %s 없음", c->name, sname);
+            return 0;
+        }
     } else c->super = NULL;
     for (i = 0; i < c->nifaces; i++) {
         const char *in = (const char *)c->ifaces[i];
-        c->ifaces[i] = cls_find_sym(in);
-        if (!c->ifaces[i]) { vm_log("interface %s of %s not found", in, c->name); return 0; }
+        c->ifaces[i] = tab_get(in);
+        if (!c->ifaces[i]) c->ifaces[i] = load_class(in);
+        if (!c->ifaces[i] && stubbable(in)) c->ifaces[i] = make_stub(in, 1);
+        if (!c->ifaces[i]) { vm_log("interface %s of %s not found", in, c->name); snprintf(vm_last_error, sizeof vm_last_error, "%s 의 인터페이스 %s 없음", c->name, in); return 0; }
     }
     /* field layout */
     slots = c->super ? c->super->inst_slots : 0;
@@ -284,7 +294,7 @@ static int link_class(Class *c)
         for (i = 0; i < c->nmethods; i++) {
             Method *m = &c->methods[i];
             int k;
-            if (m->acc & ACC_NATIVE) {
+            if ((m->acc & ACC_NATIVE) && !m->native) {
                 m->native = native_lookup(c->name, m->name, m->desc);
                 if (!m->native) { vm_log("no native for %s.%s%s", c->name, m->name, m->desc); m->native = nat_missing; }
             }
@@ -298,6 +308,61 @@ static int link_class(Class *c)
     }
     c->state = CS_LINKED;
     return 1;
+}
+
+/* ---------------- stand-ins for classes the game needs but we do not have ---------------- */
+int cls_stub_enabled;
+char vm_last_error[256];
+static int nat_stub(Thread *t, Slot *a)
+{
+    Method *m = cur_native;
+    (void)t;
+    a[0].p = 0;
+    if (m->ret == 'J' || m->ret == 'D') a[1].p = 0;
+    return NR_OK;
+}
+static Class *make_stub(const char *name, int iface)
+{
+    Class *c = (Class *)calloc(1, sizeof(Class));
+    c->name = name;
+    c->acc = ACC_PUBLIC | (iface ? (ACC_INTERFACE | ACC_ABSTRACT) : 0);
+    c->super = (Class *)sym("java/lang/Object");
+    c->ifaces = (Class **)calloc(1, sizeof(Class *));
+    c->fields = (Field *)calloc(1, sizeof(Field));
+    c->cp = (CP *)calloc(1, sizeof(CP));
+    c->ncp = 1;
+    c->is_stub = 1;
+    if (!iface) {
+        Method *m;
+        c->methods = (Method *)calloc(1, sizeof(Method));
+        c->nmethods = 1;
+        m = &c->methods[0];
+        m->name = sym("<init>"); m->desc = sym("()V"); m->acc = ACC_PUBLIC | ACC_NATIVE;
+        m->cls = c; m->vindex = -1; m->nargs = 1; m->ret = 'V'; m->native = nat_stub;
+    } else c->methods = (Method *)calloc(1, sizeof(Method));
+    tab_put(c);
+    vm_log("stub class %s (missing in runtime)", name);
+    snprintf(vm_last_error, sizeof vm_last_error, "없는 클래스 대체: %s", name);
+    if (!link_class(c)) return NULL;
+    c->state = CS_INITED;
+    return c;
+}
+Method *cls_stub_method(Class *k, const char *name, const char *desc, int is_static)
+{
+    Class *c;
+    Method *m;
+    for (c = k; c && !c->is_stub; c = c->super) {}
+    if (!c) return NULL;
+    m = (Method *)calloc(1, sizeof(Method));
+    m->name = name; m->desc = desc; m->acc = ACC_PUBLIC | ACC_NATIVE | (is_static ? ACC_STATIC : 0);
+    m->cls = c; m->vindex = -1; m->native = nat_stub;
+    parse_desc(m, is_static);
+    vm_log("stub method %s.%s%s", c->name, name, desc);
+    return m;
+}
+static int stubbable(const char *name)
+{
+    return cls_stub_enabled && strncmp(name, "java/", 5) && strncmp(name, "m480/", 5) && name[0] != '[';
 }
 
 static Class *load_class(const char *name)
@@ -324,7 +389,9 @@ Class *cls_find_sym(const char *name)
     Class *c = tab_get(name);
     if (c) return c->state == CS_ERROR ? NULL : c;
     if (name[0] == '[') return cls_array_of_desc(name);
-    return load_class(name);
+    c = load_class(name);
+    if (!c && !tab_get(name) && stubbable(name)) c = make_stub(name, 0);
+    return c;
 }
 Class *cls_find(const char *name) { return cls_find_sym(sym(name)); }
 
