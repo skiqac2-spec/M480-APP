@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.8"
+#define VERSION   "2.9"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -47,8 +47,9 @@ unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th)
 enum {
 	M_Q240 = 1000, M_Q144, M_Q360, M_ORI_P, M_ORI_L, M_STATS, M_LIST, M_GRID, M_DARK,
 	M_IMPORT, M_UPDATE, M_SELFTEST, M_ABOUT, M_EXIT,
-	M_CLEARHIST,
-	C_PLAY = 1100, C_CHANNEL, C_SUB, C_UNSUB, C_DELHIST
+	M_CLEARHIST, M_SUBMGR,
+	M_SORT0 = 1050, M_SORT1, M_SORT2, M_SORT3, M_SORT4, M_SORT5,
+	C_PLAY = 1100, C_CHANNEL, C_SUB, C_UNSUB, C_DELHIST, C_MGR_UNSUB
 };
 
 /* ---------------- theme ---------------- */
@@ -69,7 +70,7 @@ static const Theme *T = &g_light;
 static HBRUSH g_editbr;
 
 /* ---------------- views ---------------- */
-enum { V_SEARCH, V_SUBS, V_CHANNEL, V_HIST };
+enum { V_SEARCH, V_SUBS, V_CHANNEL, V_HIST, V_MGR };
 typedef struct {
 	int kind, uid;
 	YtList list;
@@ -78,10 +79,18 @@ typedef struct {
 	char *title;           /* channel name */
 	int scroll;
 	int busy, busy_more;
+	int sort;              /* 0 default, 1 newest, 2 oldest, 3 longest, 4 shortest, 5 most viewed */
+	int ord_next;
 	char msg[300];         /* shown when the list is empty */
 } View;
 
-static View g_vsearch, g_vsubs, g_vhist;
+static View g_vsearch, g_vsubs, g_vhist, g_vmgr;
+static int g_mgr;          /* subscription manager open */
+static void apply_sort(View *v);
+static void number_items(View *v, int from);
+static void mgr_close(void);
+static void mgr_build(void);
+static void mgr_open(void);
 static View *g_chan[8];
 static int g_nchan;
 static int g_tab;          /* 0 = search, 1 = subscriptions, 2 = watch history */
@@ -108,7 +117,7 @@ static volatile int g_quit;
 #define MORE_H 44
 
 /* subscriptions */
-typedef struct { char chid[32]; char *name; DWORD fetched; } Sub;
+typedef struct { char chid[32]; char *name; DWORD fetched; int feed; } Sub;
 static Sub *g_subs;
 static int g_nsubs;
 static int g_subs_loaded_once;
@@ -138,6 +147,7 @@ static volatile int g_opening;
 static View *cur(void)
 {
 	if (g_nchan) return g_chan[g_nchan - 1];
+	if (g_mgr) return &g_vmgr;
 	return g_tab == 1 ? &g_vsubs : g_tab == 2 ? &g_vhist : &g_vsearch;
 }
 
@@ -200,7 +210,7 @@ static void subs_save(void)
 	app_path(p, L"m480tube_subs.txt");
 	f = _wfopen(p, L"wb");
 	if (!f) return;
-	for (i = 0; i < g_nsubs; i++) fprintf(f, "%s\t%s\r\n", g_subs[i].chid, g_subs[i].name ? g_subs[i].name : "");
+	for (i = 0; i < g_nsubs; i++) fprintf(f, "%s\t%s\t%d\r\n", g_subs[i].chid, g_subs[i].name ? g_subs[i].name : "", g_subs[i].feed);
 	fclose(f);
 }
 
@@ -215,8 +225,10 @@ static int sub_add(const char *chid, const char *name)
 {
 	if (!chid || strncmp(chid, "UC", 2) || strlen(chid) >= 32 || sub_index(chid) >= 0) return 0;
 	g_subs = (Sub *)realloc(g_subs, (g_nsubs + 1) * sizeof(Sub));
+	memset(&g_subs[g_nsubs], 0, sizeof(Sub));
 	strcpy(g_subs[g_nsubs].chid, chid);
 	g_subs[g_nsubs].name = xstrdup(name ? name : chid);
+	g_subs[g_nsubs].feed = 1;
 	g_nsubs++;
 	return 1;
 }
@@ -239,12 +251,15 @@ static void subs_load(void)
 	f = _wfopen(p, L"rb");
 	if (!f) return;
 	while (fgets(line, sizeof line, f)) {
-		char *tab = strchr(line, '\t'), *e;
+		char *tab = strchr(line, '\t'), *e, *t2;
+		int feed = 1;
 		if (!tab) continue;
 		*tab = 0;
 		e = tab + 1 + strlen(tab + 1);
 		while (e > tab + 1 && (e[-1] == '\r' || e[-1] == '\n')) *--e = 0;
-		sub_add(line, tab + 1);
+		t2 = strchr(tab + 1, '\t');   /* third column: in the feed (1) or not (0) */
+		if (t2) { *t2 = 0; feed = atoi(t2 + 1) != 0; }
+		if (sub_add(line, tab + 1)) g_subs[g_nsubs - 1].feed = feed;
 	}
 	fclose(f);
 }
@@ -320,7 +335,8 @@ static int subs_import_file(const WCHAR *path, int *found)
 				}
 			}
 			(*found)++;
-			if (sub_add(id, title[0] ? title : id)) added++;
+			/* imported channels start outside the feed: pick them in the manager */
+			if (sub_add(id, title[0] ? title : id)) { g_subs[g_nsubs - 1].feed = 0; added++; }
 		}
 		p = *e ? e + 1 : e;
 	}
@@ -389,6 +405,7 @@ static void hist_load(void)
 		if (n > 5 && fld[5][0]) it->meta = xstrdup(fld[5]);
 	}
 	fclose(f);
+	number_items(&g_vhist, 0);
 }
 
 /* put a watched video at the top of the history (copy of the list item) */
@@ -422,6 +439,13 @@ static void hist_add(const YtItem *src)
 	memmove(&l->items[1], &l->items[0], l->n * sizeof(YtItem));
 	l->items[0] = it;
 	l->n++;
+	{
+		/* newest watch first in the default order */
+		int k, mn = 0;
+		for (k = 1; k < l->n; k++) if (l->items[k].ord < mn) mn = l->items[k].ord;
+		l->items[0].ord = mn - 1;
+	}
+	if (g_vhist.sort) apply_sort(&g_vhist);
 	LeaveCriticalSection(&g_lcs);
 	hist_save();
 }
@@ -526,11 +550,138 @@ static void grid_geom(int w, int *cw, int *tw, int *th, int *ch)
 	*ch = *th + 6 + 30 + 15 + 6;
 }
 
-static int has_more_row(View *v) { return v->list.cont || v->busy_more; }
+static int has_more_row(View *v) { return v->kind != V_MGR && (v->list.cont || v->busy_more); }
 
+/* ---------------- sorting ---------------- */
+/* "1.2만", "3,456", "1.5M" ... -> number; *pp is advanced past it */
+static double parse_num(const char **pp)
+{
+	const char *p = *pp;
+	double v = 0, frac = 0, scale = 1;
+	int seen = 0, dot = 0;
+	while (*p) {
+		if (*p >= '0' && *p <= '9') { if (dot) { scale /= 10; frac += (*p - '0') * scale; } else v = v * 10 + (*p - '0'); seen = 1; }
+		else if (*p == '.' && !dot) dot = 1;
+		else if (*p != ',') break;
+		p++;
+	}
+	if (!seen) return -1;
+	v += frac;
+	while (*p == ' ') p++;
+	if (!strncmp(p, "\xEC\xB2\x9C", 3)) { v *= 1e3; p += 3; }        /* 천 */
+	else if (!strncmp(p, "\xEB\xA7\x8C", 3)) { v *= 1e4; p += 3; }   /* 만 */
+	else if (!strncmp(p, "\xEC\x96\xB5", 3)) { v *= 1e8; p += 3; }   /* 억 */
+	else if (*p == 'K' || *p == 'k') { v *= 1e3; p++; }
+	else if (*p == 'M') { v *= 1e6; p++; }
+	else if (*p == 'B') { v *= 1e9; p++; }
+	*pp = p;
+	return v;
+}
+
+static double views_of(const YtItem *it)
+{
+	const char *m = it->meta, *p;
+	if (!m) return -1;
+	p = strstr(m, "\xEC\xA1\xB0\xED\x9A\x8C\xEC\x88\x98");          /* 조회수 */
+	if (p) { p += 9; while (*p == ' ') p++; return parse_num(&p); }
+	p = strstr(m, "view");
+	if (p) {
+		/* number just before "views" */
+		const char *q = p;
+		while (q > m && q[-1] == ' ') q--;
+		while (q > m && (strchr("0123456789.,KMBk", q[-1]))) q--;
+		return parse_num(&q);
+	}
+	return -1;
+}
+
+static long length_of(const YtItem *it)
+{
+	const char *p = it->length;
+	long t = 0;
+	int parts = 0;
+	if (!p || !(*p >= '0' && *p <= '9')) return -1;
+	while (*p) {
+		if (*p >= '0' && *p <= '9') { long n = 0; while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0'); t = t * 60 + n; parts++; }
+		else if (*p == ':') p++;
+		else break;
+	}
+	return parts ? t : -1;
+}
+
+/* bigger = newer. exact publish time when known, else "3일 전" / "2 weeks ago" */
+static double newness_of(const YtItem *it)
+{
+	static const struct { const char *u; long s; } units[] = {
+		{ "\xEC\xB4\x88", 1 }, { "\xEB\xB6\x84", 60 }, { "\xEC\x8B\x9C\xEA\xB0\x84", 3600 },
+		{ "\xEC\x9D\xBC", 86400 }, { "\xEC\xA3\xBC", 604800 }, { "\xEA\xB0\x9C\xEC\x9B\x94", 2592000 },
+		{ "\xEB\x85\x84", 31536000 }, { "second", 1 }, { "minute", 60 }, { "hour", 3600 }, { "day", 86400 },
+		{ "week", 604800 }, { "month", 2592000 }, { "year", 31536000 }
+	};
+	const char *p;
+	if (it->pub > 0) return (double)it->pub;
+	for (p = it->meta; p && *p; p++) {
+		if (*p >= '0' && *p <= '9' && (p == it->meta || !(p[-1] >= '0' && p[-1] <= '9') )) {
+			const char *q = p;
+			double n = parse_num(&q);
+			unsigned i;
+			while (*q == ' ') q++;
+			for (i = 0; i < sizeof units / sizeof units[0]; i++)
+				if (!strncmp(q, units[i].u, strlen(units[i].u)) && n >= 0)
+					return 4e9 - n * units[i].s;   /* relative: newer = larger */
+		}
+	}
+	return -1;
+}
+
+static View *g_sortv;
+static int cmp_sort(const void *a, const void *b)
+{
+	const YtItem *x = (const YtItem *)a, *y = (const YtItem *)b;
+	double kx, ky;
+	switch (g_sortv->sort) {
+	case 1: case 2: kx = newness_of(x); ky = newness_of(y); break;
+	case 3: case 4: kx = (double)length_of(x); ky = (double)length_of(y); break;
+	case 5: kx = views_of(x); ky = views_of(y); break;
+	default:
+		if (g_sortv->kind == V_SUBS) { kx = (double)x->pub; ky = (double)y->pub; break; }
+		return x->ord - y->ord;
+	}
+	/* unknown values always go last */
+	if (kx < 0 && ky < 0) return x->ord - y->ord;
+	if (kx < 0) return 1;
+	if (ky < 0) return -1;
+	if (kx == ky) return x->ord - y->ord;
+	if (g_sortv->sort == 2 || g_sortv->sort == 4) return kx < ky ? -1 : 1;
+	return kx > ky ? -1 : 1;
+}
+
+/* call with g_lcs held */
+static void apply_sort(View *v)
+{
+	if (v->kind == V_MGR || v->list.n < 2) return;
+	g_sortv = v;
+	qsort(v->list.items, v->list.n, sizeof(YtItem), cmp_sort);
+}
+
+/* numbers new items in arrival order (call with g_lcs held) */
+static void number_items(View *v, int from)
+{
+	int i;
+	for (i = from; i < v->list.n; i++) v->list.items[i].ord = v->ord_next++;
+}
+
+static const char *sort_name(int s)
+{
+	static const char *n[] = { "기본순", "최신순", "오래된순", "길이 긴순", "길이 짧은순", "조회수 많은순" };
+	return (s >= 0 && s < 6) ? n[s] : n[0];
+}
+
+#define MGR_H 40
 static int content_height(View *v)
 {
 	int n = v->list.n, h;
+	if (v->kind == V_MGR) return n * MGR_H;
 	if (g_grid) {
 		int cw, tw, th, ch;
 		grid_geom(client_w(), &cw, &tw, &th, &ch);
@@ -566,6 +717,7 @@ static int item_at(int x, int y, int *on_channel)
 	int ly = y - content_top() + v->scroll, n = v->list.n, idx;
 	*on_channel = 0;
 	if (y < content_top() || y >= content_top() + list_height() || ly < 0) return -1;
+	if (v->kind == V_MGR) { idx = ly / MGR_H; return idx < n ? idx : -1; }
 	if (g_grid) {
 		int cw, tw, th, ch, row, col, iy;
 		grid_geom(client_w(), &cw, &tw, &th, &ch);
@@ -849,6 +1001,7 @@ static void refresh_subs(void)
 		   recently than that would only return what we already have */
 		DWORD now = GetTickCount();
 		for (i = 0; i < g_nsubs; i++) {
+			if (!g_subs[i].feed) continue;
 			if (g_subs[i].fetched && now - g_subs[i].fetched < 15 * 60 * 1000) continue;
 			j->subs[j->nsubs] = g_subs[i];
 			j->subs[j->nsubs].name = xstrdup(g_subs[i].name);
@@ -857,8 +1010,13 @@ static void refresh_subs(void)
 	}
 	g_subs_loaded_once = 1;
 	if (!j->nsubs) {
+		int nf = 0;
+		for (i = 0; i < g_nsubs; i++) nf += g_subs[i].feed;
 		job_free(j);
-		status_set("이미 최신 상태입니다 (15분마다 새로 받을 수 있어요)");
+		if (!nf) {
+			strcpy(v->msg, "피드에 넣은 채널이 없습니다.\n\n오른쪽 위 [관리]를 눌러\n영상을 받아 올 채널을 체크하세요.");
+			status_set("구독 관리에서 채널을 고르세요");
+		} else status_set("이미 최신 상태입니다 (15분마다 새로 받을 수 있어요)");
 		InvalidateRect(g_hwnd, NULL, FALSE);
 		return;
 	}
@@ -914,7 +1072,10 @@ static void feed_load(void)
 			s = t + 1;
 		}
 		if (n < 4 || !fld[1][0] || strlen(fld[1]) > 15) continue;
-		if (sub_index(fld[2]) < 0) continue;   /* channel no longer subscribed */
+		{
+			int si = sub_index(fld[2]);
+			if (si < 0 || !g_subs[si].feed) continue;   /* channel no longer subscribed / not in the feed */
+		}
 		g_vsubs.list.items = (YtItem *)realloc(g_vsubs.list.items, (g_vsubs.list.n + 1) * sizeof(YtItem));
 		it = &g_vsubs.list.items[g_vsubs.list.n++];
 		memset(it, 0, sizeof *it);
@@ -927,6 +1088,7 @@ static void feed_load(void)
 		if (n > 6 && fld[6][0]) it->meta = xstrdup(fld[6]);
 	}
 	fclose(f);
+	number_items(&g_vsubs, 0);
 }
 
 static void free_item(YtItem *it)
@@ -941,7 +1103,7 @@ static void on_feed_part(FeedPart *part)
 	View *v = view_by_uid(part->uid);
 	int i, k, si = sub_index(part->chid);
 	if (si >= 0) g_subs[si].fetched = GetTickCount();
-	if (v && si >= 0) {
+	if (v && si >= 0 && g_subs[si].feed) {
 		EnterCriticalSection(&g_lcs);
 		v->list.items = (YtItem *)realloc(v->list.items, (v->list.n + part->items.n + 1) * sizeof(YtItem));
 		for (i = 0; i < part->items.n; i++) {
@@ -958,6 +1120,7 @@ static void on_feed_part(FeedPart *part)
 		}
 		part->items.n = 0;
 		if (v->list.n > 1) qsort(v->list.items, v->list.n, sizeof(YtItem), cmp_pub);
+		if (v->sort) apply_sort(v);
 		while (v->list.n > FEED_MAX) free_item(&v->list.items[--v->list.n]);
 		v->msg[0] = 0;
 		LeaveCriticalSection(&g_lcs);
@@ -969,9 +1132,10 @@ static void on_feed_part(FeedPart *part)
 
 static void merge_results(View *v, YtList *res, int replace)
 {
-	int i;
+	int i, n0;
 	EnterCriticalSection(&g_lcs);
 	if (replace) yt_list_free(&v->list);
+	n0 = v->list.n;
 	v->list.items = (YtItem *)realloc(v->list.items, (v->list.n + res->n + 1) * sizeof(YtItem));
 	for (i = 0; i < res->n; i++) {
 		int k, dup = 0;
@@ -989,6 +1153,8 @@ static void merge_results(View *v, YtList *res, int replace)
 	free(v->list.cont);
 	v->list.cont = res->cont;
 	res->cont = NULL;
+	number_items(v, n0);
+	if (v->sort) apply_sort(v);
 	LeaveCriticalSection(&g_lcs);
 }
 
@@ -1060,7 +1226,7 @@ static void open_channel(const char *chid, const char *name)
 static void go_back(void)
 {
 	View *v;
-	if (!g_nchan) return;
+	if (!g_nchan) { if (g_mgr) mgr_close(); return; }
 	EnterCriticalSection(&g_lcs);
 	v = g_chan[--g_nchan];
 	view_clear(v);
@@ -1068,6 +1234,7 @@ static void go_back(void)
 	free(v->title);
 	free(v);
 	status_set("");
+	if (!g_nchan && g_mgr) mgr_build();   /* (un)subscribed in the channel? */
 	InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
@@ -1082,6 +1249,7 @@ static void scroll_top(void)
 static void set_tab(int t)
 {
 	while (g_nchan) go_back();
+	if (g_mgr) mgr_close();
 	g_tab = t;
 	if (t == 1 && !g_subs_loaded_once) refresh_subs();
 	clamp_scroll();
@@ -1351,6 +1519,28 @@ static void paint_list(HDC dc, int w, int h)
 		else if (v->kind == V_HIST) m = "아직 본 영상이 없습니다.\n\n[검색] 탭에서 영상을 찾아 보면\n여기에 최근 본 순서대로 쌓입니다.";
 		else m = "위 칸에 검색어를 입력하고\n'검색'을 누르세요.\n\n영상을 누르면 재생되고,\n채널 이름을 누르면 채널로 갑니다.\n\n목록/격자, 다크 모드는\n오른쪽 위 메뉴에 있습니다.";
 		text_u8(g_bbdc, m, &r, DT_CENTER | DT_WORDBREAK);
+	} else if (v->kind == V_MGR) {
+		int first = v->scroll / MGR_H;
+		for (i = first, y = first * MGR_H - v->scroll; i < v->list.n && y < h; i++, y += MGR_H) {
+			YtItem *it = &v->list.items[i];
+			int si = sub_index(it->chid), on = si >= 0 && g_subs[si].feed;
+			int bx = 10, by = y + (MGR_H - 18) / 2;
+			RECT r;
+			if (i == g_pressed) fill(g_bbdc, 0, y, w, y + MGR_H, T->press);
+			/* check box */
+			fill(g_bbdc, bx, by, bx + 18, by + 18, on ? T->barbtn : T->sub);
+			if (!on) fill(g_bbdc, bx + 2, by + 2, bx + 16, by + 16, T->bg);
+			else {
+				int k;
+				for (k = 0; k < 4; k++) fill(g_bbdc, bx + 3 + k, by + 8 + k, bx + 5 + k, by + 11 + k, RGB(255, 255, 255));
+				for (k = 0; k < 8; k++) fill(g_bbdc, bx + 7 + k, by + 11 - k, bx + 9 + k, by + 14 - k, RGB(255, 255, 255));
+			}
+			SelectObject(g_bbdc, on ? g_fontb : g_font);
+			SetTextColor(g_bbdc, on ? T->fg : T->sub);
+			SetRect(&r, bx + 28, y, w - 6, y + MGR_H);
+			text_u8(g_bbdc, it->title ? it->title : it->chid, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | TXT_ELLIPSIS);
+			fill(g_bbdc, 0, y + MGR_H - 1, w, y + MGR_H, T->sep);
+		}
 	} else if (g_grid) {
 		int cw, tw, th, ch, first;
 		grid_geom(w, &cw, &tw, &th, &ch);
@@ -1430,12 +1620,51 @@ static void tab_rects(int w, RECT *a, RECT *b, RECT *c, RECT *d)
 		SetRect(b, 44, g_topbar, w - 70, g_topbar + g_tabbar);
 		SetRect(c, w - 70, g_topbar, w, g_topbar + g_tabbar);
 		SetRect(d, 0, 0, 0, 0);
+	} else if (v->kind == V_MGR) {
+		SetRect(a, 0, g_topbar, 50, g_topbar + g_tabbar);
+		SetRect(b, 50, g_topbar, w - 120, g_topbar + g_tabbar);
+		SetRect(c, w - 120, g_topbar, w - 60, g_topbar + g_tabbar);
+		SetRect(d, w - 60, g_topbar, w, g_topbar + g_tabbar);
 	} else {
-		SetRect(a, 0, g_topbar, 60, g_topbar + g_tabbar);
-		SetRect(b, 60, g_topbar, 120, g_topbar + g_tabbar);
-		SetRect(c, 120, g_topbar, 180, g_topbar + g_tabbar);
+		int tw = w >= 300 ? 52 : 44;
+		SetRect(a, 0, g_topbar, tw, g_topbar + g_tabbar);
+		SetRect(b, tw, g_topbar, 2 * tw, g_topbar + g_tabbar);
+		SetRect(c, 2 * tw, g_topbar, 3 * tw, g_topbar + g_tabbar);
 		SetRect(d, w - 70, g_topbar, w, g_topbar + g_tabbar);
 	}
+}
+
+/* buttons on the right of the tab bar: sort (all tabs), manage + refresh (subscriptions) */
+static void tab_buttons(int w, RECT *sortr, RECT *mgrr, RECT *refr)
+{
+	int tw = w >= 300 ? 52 : 44, left = 3 * tw + 2, bw;
+	SetRectEmpty(sortr); SetRectEmpty(mgrr); SetRectEmpty(refr);
+	if (cur()->kind == V_CHANNEL || cur()->kind == V_MGR) return;
+	if (g_tab == 1) {
+		bw = (w - left) / 3;
+		if (bw > 56) bw = 56;
+		SetRect(refr, w - bw, g_topbar, w, g_topbar + g_tabbar);
+		SetRect(mgrr, w - 2 * bw, g_topbar, w - bw, g_topbar + g_tabbar);
+		SetRect(sortr, w - 3 * bw, g_topbar, w - 2 * bw, g_topbar + g_tabbar);
+	} else {
+		bw = w - left;
+		if (bw > 56) bw = 56;
+		SetRect(sortr, w - bw, g_topbar, w, g_topbar + g_tabbar);
+	}
+}
+
+static void draw_btn(HDC dc, RECT *r, const char *label, int on)
+{
+	fill(dc, r->left + 2, r->top + 3, r->right - 2, r->bottom - 4, on ? T->barbtn : T->ph);
+	SetTextColor(dc, on ? RGB(255, 255, 255) : T->fg);
+	text_u8(dc, label, r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+static int feed_count(void)
+{
+	int i, n = 0;
+	for (i = 0; i < g_nsubs; i++) n += g_subs[i].feed;
+	return n;
 }
 
 static void draw_tab(HDC dc, RECT *r, const char *label, int sel)
@@ -1453,7 +1682,19 @@ static void paint_tabbar(HDC dc, int w)
 	fill(dc, 0, g_topbar, w, g_topbar + g_tabbar, T->tabbg);
 	fill(dc, 0, g_topbar + g_tabbar - 1, w, g_topbar + g_tabbar, T->sep);
 	SetBkMode(dc, TRANSPARENT);
-	if (v->kind == V_CHANNEL) {
+	if (v->kind == V_MGR) {
+		char s[80];
+		SelectObject(dc, g_fontb);
+		draw_btn(dc, &a, "완료", 1);
+		SelectObject(dc, g_fonts);
+		SetTextColor(dc, T->fg);
+		_snprintf(s, sizeof s, "피드 %d / 구독 %d", feed_count(), g_nsubs);
+		s[sizeof s - 1] = 0;
+		b.left += 4;
+		text_u8(dc, s, &b, DT_LEFT | DT_VCENTER | DT_SINGLELINE | TXT_ELLIPSIS);
+		draw_btn(dc, &c, "전체 선택", 0);
+		draw_btn(dc, &d, "전체 해제", 0);
+	} else if (v->kind == V_CHANNEL) {
 		int subbed = sub_index(v->chid) >= 0;
 		SelectObject(dc, g_fontb);
 		SetTextColor(dc, T->tabfg);
@@ -1466,13 +1707,18 @@ static void paint_tabbar(HDC dc, int w)
 		text_u8(dc, subbed ? "구독 중" : "구독", &c, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 	} else {
 		SelectObject(dc, g_fontb);
+		RECT sr, mr, rr;
 		draw_tab(dc, &a, "기록", g_tab == 2);
 		draw_tab(dc, &b, "검색", g_tab == 0);
 		draw_tab(dc, &c, "구독", g_tab == 1);
+		tab_buttons(w, &sr, &mr, &rr);
+		SelectObject(dc, g_fonts);
+		draw_btn(dc, &sr, v->sort ? "정렬*" : "정렬", v->sort != 0);
 		if (g_tab == 1) {
-			SelectObject(dc, g_fonts);
+			int narrow = rr.right - rr.left < 50;
+			draw_btn(dc, &mr, "관리", 0);
 			SetTextColor(dc, T->morefg);
-			text_u8(dc, v->busy ? "불러오는 중" : "새로고침", &d, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			text_u8(dc, v->busy ? (narrow ? "..." : "불러오는 중") : (narrow ? "갱신" : "새로고침"), &rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 		}
 	}
 }
@@ -1552,6 +1798,7 @@ static void show_menu(void)
 	AppendMenuW(m, MF_POPUP, (UINT_PTR)s, L"화면");
 	AppendMenuW(m, MF_POPUP, (UINT_PTR)q, L"화질");
 	AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+	AppendMenuW(m, MF_STRING, M_SUBMGR, L"구독 관리 (피드에 넣을 채널)");
 	AppendMenuW(m, MF_STRING, M_IMPORT, L"구독 목록 가져오기");
 	AppendMenuW(m, MF_STRING, M_CLEARHIST, L"시청 기록 모두 지우기");
 	AppendMenuW(m, MF_STRING, M_UPDATE, L"유튜브 연결 설정 다시 받기");
@@ -1680,11 +1927,12 @@ static void import_subs(void)
 		return;
 	}
 	subs_save();
-	if (st.added) _snprintf(s, sizeof s, "채널 %d개를 새로 구독했습니다.\n(전체 구독 %d개)", st.added, g_nsubs);
+	if (st.added) _snprintf(s, sizeof s, "채널 %d개를 새로 구독했습니다.\n(전체 구독 %d개)\n\n가져온 채널은 아직 피드에 없습니다.\n구독 관리에서 영상을 받아 볼\n채널만 체크하세요.", st.added, g_nsubs);
 	else _snprintf(s, sizeof s, "이미 모두 구독 중입니다.\n(전체 구독 %d개)", g_nsubs);
 	msgbox_u8(s, MB_OK);
 	g_subs_loaded_once = 0;
 	set_tab(1);
+	if (st.added) mgr_open();
 }
 
 /* ---------------- input ---------------- */
@@ -1705,9 +1953,155 @@ static void maybe_load_more(void)
 	else if (v->kind == V_CHANNEL) load_channel(v, 1);
 }
 
+/* ---------------- subscription manager ---------------- */
+static int cmp_name(const void *a, const void *b)
+{
+	const YtItem *x = (const YtItem *)a, *y = (const YtItem *)b;
+	return _stricmp(x->title ? x->title : "", y->title ? y->title : "");
+}
+
+static void mgr_build(void)
+{
+	View *v = &g_vmgr;
+	int i;
+	EnterCriticalSection(&g_lcs);
+	yt_list_free(&v->list);
+	v->kind = V_MGR;
+	if (g_nsubs) {
+		v->list.items = (YtItem *)calloc(g_nsubs, sizeof(YtItem));
+		for (i = 0; i < g_nsubs; i++) {
+			YtItem *it = &v->list.items[v->list.n++];
+			strcpy(it->chid, g_subs[i].chid);
+			it->title = xstrdup(g_subs[i].name ? g_subs[i].name : g_subs[i].chid);
+		}
+		qsort(v->list.items, v->list.n, sizeof(YtItem), cmp_name);
+	}
+	strcpy(v->msg, "구독한 채널이 없습니다.\n\n메뉴 > '구독 목록 가져오기'로\n유튜브 구독 목록을 옮겨 오거나\n채널에서 [구독]을 누르세요.");
+	LeaveCriticalSection(&g_lcs);
+	clamp_scroll();
+}
+
+static int g_mgr_changed;
+
+static void mgr_open(void)
+{
+	g_mgr_changed = 0;
+	g_vmgr.scroll = 0;
+	g_mgr = 1;
+	mgr_build();
+	status_set("체크한 채널의 새 영상만 구독 탭에 나옵니다");
+	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static void mgr_close(void)
+{
+	int i, k = 0, changed = g_mgr_changed;
+	if (!g_mgr) return;
+	g_mgr = 0;
+	EnterCriticalSection(&g_lcs);
+	yt_list_free(&g_vmgr.list);
+	/* drop videos of channels taken out of the feed */
+	for (i = 0; i < g_vsubs.list.n; i++) {
+		int si = sub_index(g_vsubs.list.items[i].chid);
+		if (si < 0 || !g_subs[si].feed) { free_item(&g_vsubs.list.items[i]); changed = 1; }
+		else g_vsubs.list.items[k++] = g_vsubs.list.items[i];
+	}
+	g_vsubs.list.n = k;
+	LeaveCriticalSection(&g_lcs);
+	subs_save();
+	if (changed) {
+		feed_save();
+		g_vsubs.scroll = 0;
+		g_subs_loaded_once = 0;
+		g_tab = 1;
+		clamp_scroll();
+		refresh_subs();
+	} else status_set("");
+	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static void mgr_set_all(int on)
+{
+	int i;
+	for (i = 0; i < g_nsubs; i++) {
+		/* channels newly put in the feed are fetched right away */
+		if (on && !g_subs[i].feed) g_subs[i].fetched = 0;
+		if (g_subs[i].feed != on) g_mgr_changed = 1;
+		g_subs[i].feed = on;
+	}
+	status_set(on ? "모든 채널을 피드에 넣었습니다" : "모든 채널을 피드에서 뺐습니다");
+	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static void mgr_toggle(int idx)
+{
+	int si;
+	if (idx < 0 || idx >= g_vmgr.list.n) return;
+	si = sub_index(g_vmgr.list.items[idx].chid);
+	if (si < 0) return;
+	g_subs[si].feed = !g_subs[si].feed;
+	if (g_subs[si].feed) g_subs[si].fetched = 0;
+	g_mgr_changed = 1;
+	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static void mgr_item_menu(int idx, int x, int y)
+{
+	HMENU m;
+	int cmd, si;
+	if (idx < 0 || idx >= g_vmgr.list.n) return;
+	si = sub_index(g_vmgr.list.items[idx].chid);
+	if (si < 0) return;
+	m = CreatePopupMenu();
+	AppendMenuW(m, MF_STRING, C_PLAY, g_subs[si].feed ? L"피드에서 빼기" : L"피드에 넣기");
+	AppendMenuW(m, MF_STRING, C_CHANNEL, L"채널 보기");
+	AppendMenuW(m, MF_STRING, C_MGR_UNSUB, L"구독 취소");
+	g_ctx_idx = idx;
+	cmd = popup_at(m, x, y, TPM_LEFTALIGN | TPM_TOPALIGN);
+	DestroyMenu(m);
+	if (cmd) PostMessageW(g_hwnd, WM_COMMAND, cmd, 0);
+}
+
+/* ---------------- sorting menu ---------------- */
+static void sort_menu(int x, int y)
+{
+	View *v = cur();
+	HMENU m = CreatePopupMenu();
+	int cmd, i;
+	for (i = 0; i < 6; i++) {
+		WCHAR wl[40];
+		const char *nm = sort_name(i);
+		if (i == 0) nm = v->kind == V_SUBS ? "기본순 (새 영상 먼저)" : v->kind == V_HIST ? "기본순 (최근 본 순)" : "기본순 (유튜브 순서)";
+		MultiByteToWideChar(CP_UTF8, 0, nm, -1, wl, 40);
+		AppendMenuW(m, MF_STRING | (v->sort == i ? MF_CHECKED : 0), M_SORT0 + i, wl);
+	}
+	cmd = popup_at(m, x, y, TPM_RIGHTALIGN | TPM_TOPALIGN);
+	DestroyMenu(m);
+	if (cmd) PostMessageW(g_hwnd, WM_COMMAND, cmd, 0);
+}
+
+static void set_sort(int s)
+{
+	View *v = cur();
+	char msg[80];
+	if (v->kind == V_MGR) return;
+	v->sort = s;
+	EnterCriticalSection(&g_lcs);
+	g_sortv = v;
+	if (v->list.n > 1) qsort(v->list.items, v->list.n, sizeof(YtItem), cmp_sort);
+	LeaveCriticalSection(&g_lcs);
+	_snprintf(msg, sizeof msg, "정렬: %s%s", sort_name(s),
+		(s && v->list.cont) ? " (불러온 영상 안에서)" : "");
+	msg[sizeof msg - 1] = 0;
+	status_set(msg);
+	scroll_top();
+	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
 static void activate_item(int idx, int on_channel)
 {
 	View *v = cur();
+	if (v->kind == V_MGR) { mgr_toggle(idx); return; }
 	if (idx == v->list.n) {
 		if (v->kind == V_SEARCH) start_search(NULL, 1);
 		else if (v->kind == V_CHANNEL) load_channel(v, 1);
@@ -1763,15 +2157,24 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		if (y < content_top()) {
 			View *v = cur();
 			tab_rects(cr.right, &a, &b, &c, &d);
-			if (v->kind == V_CHANNEL) {
+			if (v->kind == V_MGR) {
+				if (PtInRect(&a, pt)) mgr_close();
+				else if (PtInRect(&c, pt)) mgr_set_all(1);
+				else if (PtInRect(&d, pt)) mgr_set_all(0);
+				else if (PtInRect(&b, pt)) scroll_top();
+			} else if (v->kind == V_CHANNEL) {
 				if (PtInRect(&a, pt)) go_back();
 				else if (PtInRect(&c, pt)) toggle_sub(v->chid, v->title);
 				else if (PtInRect(&b, pt)) scroll_top();   /* tap the channel name: back to the top */
 			} else {
 				/* tapping the tab you are already on jumps back to the top */
+				RECT sr, mr, rr;
 				int t = PtInRect(&a, pt) ? 2 : PtInRect(&b, pt) ? 0 : PtInRect(&c, pt) ? 1 : -1;
+				tab_buttons(cr.right, &sr, &mr, &rr);
 				if (t >= 0) { if (t == g_tab) scroll_top(); else set_tab(t); }
-				else if (PtInRect(&d, pt) && g_tab == 1) refresh_subs();
+				else if (PtInRect(&sr, pt)) sort_menu(sr.right, sr.bottom);
+				else if (PtInRect(&mr, pt)) mgr_open();
+				else if (PtInRect(&rr, pt)) refresh_subs();
 			}
 			return 0;
 		}
@@ -1839,7 +2242,8 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 				g_down = 0;
 				ReleaseCapture();
 				list_invalidate();
-				item_menu(idx, g_down_x, g_down_y);
+				if (cur()->kind == V_MGR) mgr_item_menu(idx, g_down_x, g_down_y);
+				else item_menu(idx, g_down_x, g_down_y);
 				g_pressed = -1;
 				list_invalidate();
 			}
@@ -1847,10 +2251,11 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		return 0;
 	case WM_KEYDOWN: {
 		View *v = cur();
-		int step = g_grid ? 140 : ROW_H;
+		int step = v->kind == V_MGR ? MGR_H : g_grid ? 140 : ROW_H;
 		if (w == VK_DOWN) { v->scroll += step; clamp_scroll(); list_invalidate(); maybe_load_more(); }
 		else if (w == VK_UP) { v->scroll -= step; clamp_scroll(); list_invalidate(); }
 		else if (w == VK_ESCAPE || w == VK_BACK) go_back();
+		else if (w == VK_RETURN && v->kind == V_MGR) mgr_toggle(v->scroll / MGR_H);
 		else if (w == VK_RETURN) {
 			int idx = g_grid ? 0 : v->scroll / ROW_H;
 			if (g_grid) { int cw, tw, th, ch; grid_geom(client_w(), &cw, &tw, &th, &ch); idx = (v->scroll / ch) * 2; }
@@ -1896,7 +2301,28 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 			msgbox_u8("M480Tube " VERSION "\nSCH-M480용 유튜브 뷰어\n\n채널 이름을 누르면 채널로,\n영상을 길게 누르면 메뉴가 나옵니다.", MB_OK);
 			return 0;
 		case M_EXIT: DestroyWindow(h); return 0;
-		case C_PLAY: open_video(g_ctx_idx); return 0;
+		case M_SORT0: case M_SORT1: case M_SORT2: case M_SORT3: case M_SORT4: case M_SORT5:
+			set_sort(LOWORD(w) - M_SORT0);
+			return 0;
+		case M_SUBMGR:
+			set_tab(1);
+			mgr_open();
+			return 0;
+		case C_MGR_UNSUB:
+			if (cur() == &g_vmgr && g_ctx_idx >= 0 && g_ctx_idx < g_vmgr.list.n) {
+				char chid[32], *name = xstrdup(g_vmgr.list.items[g_ctx_idx].title);
+				strcpy(chid, g_vmgr.list.items[g_ctx_idx].chid);
+				toggle_sub(chid, name);
+				free(name);
+				g_mgr_changed = 1;
+				mgr_build();
+				InvalidateRect(h, NULL, FALSE);
+			}
+			return 0;
+		case C_PLAY:
+			if (cur() == &g_vmgr) { mgr_toggle(g_ctx_idx); return 0; }
+			open_video(g_ctx_idx);
+			return 0;
 		case C_DELHIST:
 			if (cur() == &g_vhist) { hist_remove(g_ctx_idx); clamp_scroll(); InvalidateRect(h, NULL, FALSE); }
 			return 0;
@@ -1916,6 +2342,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 				YtItem *it = &v->list.items[g_ctx_idx];
 				char chid[32], *name = xstrdup(it->channel ? it->channel : "");
 				strcpy(chid, it->chid);
+				if (v->kind == V_MGR) { free(name); name = xstrdup(it->title ? it->title : ""); }
 				if (LOWORD(w) == C_CHANNEL) open_channel(chid, name[0] ? name : NULL);
 				else toggle_sub(chid, (v->kind == V_CHANNEL && v->title) ? v->title : name);
 				free(name);

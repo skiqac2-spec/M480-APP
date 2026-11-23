@@ -8,6 +8,7 @@ typedef struct {
 	char id[16];
 	char chid[32];   /* uploader channel id (UC...) if known */
 	long pub;        /* publish time (unix), 0 unknown - subscription feed */
+	int ord;         /* position as loaded (for 'default' sort) */
 	char *title;     /* UTF-8 */
 	char *channel;
 	char *length;    /* "12:34" or NULL */
