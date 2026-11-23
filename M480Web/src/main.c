@@ -386,16 +386,14 @@ static Doc *about_page(const char *url)
 		/* home */
 		buf_adds(&b,
 			"<title>M480Web</title>"
-			"<h2>나무위키</h2>"
-			"<form action=\"https://namu.wiki/Go\" method=\"get\">"
-			"<input type=text name=q size=13 placeholder=\"문서 이름 입력\"> <input type=submit value=\"검색\"></form>"
+			"<h2>위키 검색</h2>"
+			"<form action=\"about:search\">"
+			"<input type=text name=q size=14 placeholder=\"문서 이름 입력\"><br>"
+			"<input type=submit name=s value=\"나무위키\"> <input type=submit name=s value=\"위키백과\"></form>"
 			"<p><a href=\"https://namu.wiki/w/%EB%82%98%EB%AC%B4%EC%9C%84%ED%82%A4:%EB%8C%80%EB%AC%B8\"><b>나무위키 대문</b></a> · "
-			"<a href=\"https://namu.wiki/random\">아무 문서</a></p>"
-			"<h3>위키백과</h3>"
-			"<form action=\"https://ko.m.wikipedia.org/w/index.php\" method=\"get\">"
-			"<input type=hidden name=title value=\"특수:검색\"><input type=hidden name=go value=\"보기\">"
-			"<input type=text name=search size=13 placeholder=\"문서 이름 입력\"> <input type=submit value=\"검색\"></form>"
-			"<p><small>주소창에 단어만 쳐도 나무위키에서 찾습니다. 나무위키는 글자만 깔끔하게 보여 줍니다.</small></p>");
+			"<a href=\"https://namu.wiki/random\">아무 문서</a> · "
+			"<a href=\"https://ko.m.wikipedia.org/\">위키백과 대문</a></p>"
+			"<p><small>입력 후 Enter를 누르면 나무위키에서 찾습니다. 주소창에 단어만 쳐도 됩니다.</small></p>");
 		if (g_nbm) {
 			buf_adds(&b, "<h3>\xEC\xA6\x90\xEA\xB2\xA8\xEC\xB0\xBE\xEA\xB8\xB0</h3><ul>");
 			for (i = 0; i < g_nbm && i < 12; i++) { buf_adds(&b, "<li><a href=\""); h_esc(&b, g_bm[i].url); buf_adds(&b, "\">"); h_esc(&b, g_bm[i].title); buf_adds(&b, "</a>"); }
@@ -701,6 +699,7 @@ static void install_doc(Doc *d, int mode, const char *tls)
 	if (d->refresh_url && d->refresh_delay <= 5) SetTimer(g_hwnd, TM_REFRESH, d->refresh_delay * 1000 + 100, NULL);
 	start_images();
 	toolbar_invalidate();
+	if (GetFocus() != g_addr && !g_field) SetFocus(g_view);
 }
 
 static void save_download(Job *j)
@@ -1181,6 +1180,25 @@ static void navigate(const char *url0, const char *post, int postlen, const char
 #endif
 	field_commit(1);
 	picker_close();
+	/* home page search box: one field, two buttons */
+	if (!strncmp(url, "about:search?", 13)) {
+		char *q = query_param(url + 13, "q"), *sb = query_param(url + 13, "s");
+		char *target = NULL;
+		if (q && *q) {
+			char *e = url_encode(q), *c;
+			Buf b;
+			buf_init(&b);
+			if (sb && !strcmp(sb, "위키백과")) buf_adds(&b, "https://ko.m.wikipedia.org/w/index.php?title=%ED%8A%B9%EC%88%98:%EA%B2%80%EC%83%89&go=1&search=");
+			else buf_adds(&b, "https://namu.wiki/Go?q=");
+			for (c = e; *c; c++) { if (*c == '+') buf_adds(&b, "%20"); else buf_addc(&b, *c); }
+			free(e);
+			target = buf_detach(&b);
+		}
+		free(q); free(sb);
+		free(url);
+		if (target) { navigate(target, NULL, 0, NULL, NAV_NEW); free(target); }
+		return;
+	}
 	/* file box commands */
 	if (!strncmp(url, "about:get?", 10) || !strncmp(url, "about:getall?", 13) || !strncmp(url, "about:open?", 11)) {
 		int n = atoi(strchr(url, '?') + 1), i;
@@ -1686,6 +1704,69 @@ static void link_menu(int link, int x, int y)
 	else if (cmd == M_LCOPY) copy_text(g_doc->links[link]);
 }
 
+/* ---------------- hardware keys ---------------- */
+#define M_SOFTMENU 1990
+#define M_GOBACK   1991
+#define HK_SOFT2   0xB002
+#ifndef MOD_KEYUP
+#define MOD_KEYUP 0x1000
+#endif
+typedef BOOL (WINAPI *PUnregisterFunc1)(UINT, UINT);
+typedef HANDLE (WINAPI *PImmAssoc)(HWND, HANDLE);
+typedef UINT (WINAPI *PImmGetVK)(HWND);
+static PImmGetVK g_immgetvk;
+static int g_softkey_on;
+
+static void keys_init(void)
+{
+	HMODULE m;
+	PImmAssoc a = NULL;
+#ifdef _WIN32_WCE
+	m = LoadLibraryW(L"coredll.dll");
+	if (m) {
+		a = (PImmAssoc)GetProcAddressW(m, L"ImmAssociateContext");
+		g_immgetvk = (PImmGetVK)GetProcAddressW(m, L"ImmGetVirtualKey");
+	}
+#else
+	m = LoadLibraryW(L"imm32.dll");
+	if (m) {
+		a = (PImmAssoc)GetProcAddress(m, "ImmAssociateContext");
+		g_immgetvk = (PImmGetVK)GetProcAddress(m, "ImmGetVirtualKey");
+	}
+#endif
+	/* page view needs plain keys (Backspace etc.), not Korean IME composition */
+	if (a) { a(g_view, NULL); a(g_hwnd, NULL); }
+}
+
+/* right soft key (above the End key): take it over while M480Web is in front */
+static void softkey_grab(int on)
+{
+#ifdef _WIN32_WCE
+	static PUnregisterFunc1 unreg;
+	static int looked;
+	if (!looked) {
+		HMODULE m = LoadLibraryW(L"coredll.dll");
+		looked = 1;
+		if (m) unreg = (PUnregisterFunc1)GetProcAddressW(m, L"UnregisterFunc1");
+	}
+	if (on && !g_softkey_on) {
+		if (unreg) unreg(MOD_KEYUP, VK_F2);
+		if (RegisterHotKey(g_hwnd, HK_SOFT2, MOD_KEYUP, VK_F2)) g_softkey_on = 1;
+	} else if (!on && g_softkey_on) {
+		UnregisterHotKey(g_hwnd, HK_SOFT2);
+		g_softkey_on = 0;
+	}
+#else
+	(void)on;
+#endif
+}
+
+static WPARAM real_vk(HWND h, WPARAM w)
+{
+	if (w == 0xE5 && g_immgetvk) { UINT v = g_immgetvk(h); if (v) return v; }  /* VK_PROCESSKEY */
+	return w;
+}
+
 static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
 	switch (m) {
@@ -1808,16 +1889,22 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		else if (link >= 0 && g_doc && link < g_doc->nlinks) navigate(g_doc->links[link], NULL, 0, NULL, NAV_NEW);
 		return 0;
 	}
+	case WM_KEYUP:
+		if (real_vk(h, w) == VK_F2) { PostMessageW(g_hwnd, WM_COMMAND, M_SOFTMENU, 0); return 0; }
+		break;
 	case WM_KEYDOWN: {
 		int line = font_height(1 << S_SZ_SH) * 3, page = view_height() - SC(30);
+		w = real_vk(h, w);
 		switch (w) {
+		case VK_ESCAPE: PostMessageW(g_hwnd, WM_COMMAND, M_GOBACK, 0); return 0;
+		case VK_F2: return 0;
 		case VK_UP: set_scroll(g_scroll - line); return 0;
 		case VK_DOWN: set_scroll(g_scroll + line); return 0;
 		case VK_LEFT: case VK_PRIOR: set_scroll(g_scroll - page); return 0;
 		case VK_RIGHT: case VK_NEXT: case VK_SPACE: set_scroll(g_scroll + page); return 0;
 		case VK_HOME: set_scroll(0); return 0;
 		case VK_END: set_scroll(g_lay.height); return 0;
-		case VK_BACK: SendMessageW(g_hwnd, WM_COMMAND, M_TOP - 100, 0); return 0;
+		case VK_BACK: PostMessageW(g_hwnd, WM_COMMAND, M_GOBACK, 0); return 0;
 		}
 		break;
 	}
@@ -2158,7 +2245,8 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 			if (g_doc && strncmp(g_doc->url, "about:", 6)) navigate(g_doc->url, NULL, 0, NULL, NAV_RELOAD);
 			return 0;
 		case M_TOP: set_scroll(0); return 0;
-		case M_TOP - 100: go_hist(-1); return 0;
+		case M_TOP - 100: case M_GOBACK: go_hist(-1); return 0;
+		case M_SOFTMENU: show_menu(); return 0;
 		case M_BOTTOM: set_scroll(g_lay.height); return 0;
 		case M_INFO: page_info(); return 0;
 		case M_COOKIES:
@@ -2212,8 +2300,18 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		if (w == 224 /* SPI_SETSIPINFO */ || w == SPI_SETWORKAREA) fit_window();
 		break;
 	case WM_ACTIVATE:
-		if (LOWORD(w) != WA_INACTIVE) fit_window();
+		if (LOWORD(w) != WA_INACTIVE) { fit_window(); softkey_grab(1); }
+		else softkey_grab(0);
 		break;
+	case WM_HOTKEY:
+		if (w == HK_SOFT2) {
+			if (LOWORD(l) & MOD_KEYUP) show_menu();
+			return 0;
+		}
+		break;
+	case WM_KEYDOWN: case WM_KEYUP:
+		/* keys that reach the main window (focus not in the page) work like in the page */
+		return SendMessageW(g_view, m, w, l);
 	case WM_CLOSE:
 		DestroyWindow(h);
 		return 0;
@@ -2301,6 +2399,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE hp, LPWSTR cmd, int show)
 	ShowWindow(g_hwnd, show);
 	UpdateWindow(g_hwnd);
 	SetFocus(g_view);
+	keys_init();
 	{
 		/* start page: command line URL or home */
 		char *u = NULL;
