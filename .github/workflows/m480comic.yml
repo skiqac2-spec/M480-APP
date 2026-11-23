@@ -5,6 +5,7 @@ on:
     paths:
       - 'M480Comic/**'
       - 'M480Web/src/**'
+      - 'M480Web/third_party/**'
       - '.github/workflows/m480comic.yml'
   workflow_dispatch:
 

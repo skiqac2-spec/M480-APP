@@ -1,7 +1,7 @@
 # M480-APP 파일 목록 (M480Web '내 파일함'이 읽음)
 # 형식: @그룹ID<TAB>제목<TAB>날짜  /  파일경로(이 폴더 기준)<TAB>크기(자동)<TAB>설명<TAB>휴대폰에 저장될 경로(생략 가능)
 # files.txt 는 tools/update_manifest.py 가 이 파일로부터 만든다.
-@M480Comic	M480 만화 뷰어 1.0 (사이트 이미지만 화면 맞춤 표시)	2026-11-23
+@M480Comic	M480 만화 뷰어 1.1 (사이트 이미지만 화면 맞춤 표시)	2026-11-23 TLS 1.3 지원
 M480Comic/M480Comic.cab	-	설치 파일 - 누르면 설치
 M480Comic/M480Comic.exe	-	설치 없이 쓰는 실행 파일
 M480Comic/README.txt	-	사용 설명서

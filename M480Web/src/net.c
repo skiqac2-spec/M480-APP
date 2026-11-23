@@ -2,6 +2,9 @@
 #include <winsock2.h>
 #include "util.h"
 #include "net.h"
+#ifdef NET_TLS13
+#include "tls13.h"
+#endif
 #include "url.h"
 #include "bearssl.h"
 #include <stdio.h>
@@ -99,6 +102,9 @@ void net_init(void)
 	if (g_inited) return;
 	g_inited = 1;
 	InitializeCriticalSection(&g_cs);
+#ifdef NET_TLS13
+	t13_global_init();
+#endif
 	WSAStartup(MAKEWORD(2, 2), &wd);
 	cookies_load();
 }
@@ -257,6 +263,9 @@ typedef struct {
 	int rpos, rlen;
 	int eof;
 	char err[200];
+#ifdef NET_TLS13
+	T13 *t13;   /* TLS 1.3 connection (mbedTLS) instead of BearSSL */
+#endif
 } Conn;
 
 static int wait_sock(Conn *c, int forwrite, int timeout_ms)
@@ -298,6 +307,40 @@ static int sock_write(void *ctx, const unsigned char *buf, size_t len)
 	return r;
 }
 
+#ifdef NET_TLS13
+/* hosts that need the TLS 1.3 engine (BearSSL handshake failed) */
+static char g_t13hosts[32][96];
+static int g_nt13;
+static int t13_host(const char *h)
+{
+	int i, r = 0;
+	EnterCriticalSection(&g_cs);
+	for (i = 0; i < g_nt13; i++) if (strieq(g_t13hosts[i], h)) { r = 1; break; }
+	LeaveCriticalSection(&g_cs);
+	return r;
+}
+static void t13_host_add(const char *h)
+{
+	if (strlen(h) >= sizeof g_t13hosts[0] || t13_host(h)) return;
+	EnterCriticalSection(&g_cs);
+	if (g_nt13 == 32) { memmove(g_t13hosts, g_t13hosts[1], sizeof g_t13hosts[0] * 31); g_nt13--; }
+	strcpy(g_t13hosts[g_nt13++], h);
+	LeaveCriticalSection(&g_cs);
+}
+static int t13_send(void *ctx, unsigned char *buf, size_t len) { return sock_write(ctx, buf, len); }
+static int t13_recv(void *ctx, unsigned char *buf, size_t len)
+{
+	Conn *c = (Conn *)ctx;
+	int r = wait_sock(c, 0, 30000);
+	if (r <= 0) return -1;
+	r = recv(c->s, (char *)buf, (int)len, 0);
+	if (r == 0) return 0;
+	if (r < 0) return -1;
+	entropy_stir(NULL, 0);
+	return r;
+}
+#endif
+
 static int is_ip(const char *h)
 {
 	for (; *h; h++) if (!((*h >= '0' && *h <= '9') || *h == '.')) return 0;
@@ -321,6 +364,9 @@ static const char *tls_err_text(int e)
 
 static void conn_close(Conn *c)
 {
+#ifdef NET_TLS13
+	if (c->t13) { t13_close(c->t13); c->t13 = NULL; }
+#endif
 	if (c->s != INVALID_SOCKET) {
 		if (c->ctl) c->ctl->sock = (unsigned int)INVALID_SOCKET;
 		closesocket(c->s);
@@ -336,6 +382,9 @@ static int conn_open(Conn *c, const Url *u, NetCtl *ctl, HttpResp *resp)
 	unsigned long addr;
 	int r;
 	memset(c, 0, offsetof(Conn, iobuf));
+#ifdef NET_TLS13
+	c->t13 = NULL;
+#endif
 	c->s = INVALID_SOCKET;
 	c->ctl = ctl;
 	c->rpos = c->rlen = 0;
@@ -385,6 +434,14 @@ static int conn_open(Conn *c, const Url *u, NetCtl *ctl, HttpResp *resp)
 			}
 		}
 	}
+#ifdef NET_TLS13
+	if (strcmp(u->scheme, "https") == 0 && t13_host(u->host)) {
+		c->tls = 2;
+		c->t13 = t13_open(is_ip(u->host) ? NULL : u->host, t13_send, t13_recv, c, resp->err, sizeof resp->err);
+		if (!c->t13) { conn_close(c); return 0; }
+		return 1;
+	}
+#endif
 	if (strcmp(u->scheme, "https") == 0) {
 		unsigned char seed[32];
 		br_ssl_session_parameters sp;
@@ -430,6 +487,9 @@ static void tls_fail(Conn *c, HttpResp *resp, const Url *u)
 
 static int conn_write(Conn *c, const void *d, int n)
 {
+#ifdef NET_TLS13
+	if (c->tls == 2) return t13_write(c->t13, d, n);
+#endif
 	if (c->tls) {
 		if (br_sslio_write_all(&c->io, d, n) < 0) return 0;
 		return 1;
@@ -445,7 +505,7 @@ static int conn_write(Conn *c, const void *d, int n)
 }
 static int conn_flush(Conn *c)
 {
-	if (c->tls) return br_sslio_flush(&c->io) == 0;
+	if (c->tls == 1) return br_sslio_flush(&c->io) == 0;
 	return 1;
 }
 
@@ -455,6 +515,10 @@ static int conn_fill(Conn *c)
 	if (c->eof) return 0;
 	if (c->rpos < c->rlen) return 1;
 	c->rpos = c->rlen = 0;
+#ifdef NET_TLS13
+	if (c->tls == 2) r = t13_read(c->t13, c->rb, sizeof c->rb);
+	else
+#endif
 	if (c->tls) r = br_sslio_read(&c->io, c->rb, sizeof c->rb);
 	else r = sock_read(c, c->rb, sizeof c->rb);
 	if (r <= 0) { c->eof = 1; return 0; }
@@ -819,7 +883,7 @@ static int do_one(const char *url, const char *method, const char *body, int bod
 	}
 	buf_adds(&req, "\r\n");
 	if (!conn_write(c, req.p, req.len) || (body && bodylen && !conn_write(c, body, bodylen)) || !conn_flush(c)) {
-		if (c->tls) tls_fail(c, r, &u);
+		if (c->tls == 1) tls_fail(c, r, &u);
 		else if (!r->err[0]) strcpy(r->err, ctl && ctl->abort ? "취소됨" : "요청 전송 실패");
 		goto done;
 	}
@@ -828,7 +892,7 @@ static int do_one(const char *url, const char *method, const char *body, int bod
 	/* status line */
 	buf_init(&line);
 	if (!conn_readline(c, &line) || strncmp(line.p, "HTTP/", 5) != 0) {
-		if (c->tls && br_ssl_engine_last_error(&c->sc.eng)) tls_fail(c, r, &u);
+		if (c->tls == 1 && br_ssl_engine_last_error(&c->sc.eng)) tls_fail(c, r, &u);
 		else if (!r->err[0]) strcpy(r->err, ctl && ctl->abort ? "취소됨" : "서버 응답 없음");
 		buf_free(&line);
 		goto done;
@@ -837,7 +901,10 @@ static int do_one(const char *url, const char *method, const char *body, int bod
 		const char *sp = strchr(line.p, ' ');
 		r->status = sp ? atoi(sp + 1) : 0;
 	}
-	if (c->tls) {
+#ifdef NET_TLS13
+	if (c->tls == 2) t13_info(c->t13, r->tlsinfo, sizeof r->tlsinfo);
+#endif
+	if (c->tls == 1) {
 		br_ssl_session_parameters sp;
 		static const struct { int id; const char *n; } suites[] = {
 			{ BR_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, "ECDHE-ECDSA-AES128-GCM" },
@@ -961,6 +1028,23 @@ int http_request(const char *url, const char *method, const char *body, int body
 		HttpResp tmp;
 		memset(&tmp, 0, sizeof tmp);
 		ok = do_one(cur, meth, body, bodylen, ctype, ref, &tmp, ctl, maxbytes, &loc);
+#ifdef NET_TLS13
+		/* BearSSL (TLS 1.2) could not talk to this server: try the TLS 1.3 engine */
+		if (!ok && !tmp.certerr && !tmp.status && !(ctl && ctl->abort) && strstr(tmp.err, "보안 연결 실패") &&
+		    !strstr(tmp.err, "TLS 1.3")) {
+			Url tu;
+			if (url_parse(cur, &tu)) {
+				if (!t13_host(tu.host)) {
+					t13_host_add(tu.host);
+					free(loc); loc = NULL;
+					http_resp_free(&tmp);
+					memset(&tmp, 0, sizeof tmp);
+					ok = do_one(cur, meth, body, bodylen, ctype, ref, &tmp, ctl, maxbytes, &loc);
+				}
+				url_free(&tu);
+			}
+		}
+#endif
 		if (!ok && is_time_err(tmp.certerr) && time_sync(ctl)) {
 			free(loc); loc = NULL;
 			http_resp_free(&tmp);
