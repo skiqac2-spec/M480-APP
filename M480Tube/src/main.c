@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.9"
+#define VERSION   "2.9.1"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -859,9 +859,10 @@ static int cmp_pub(const void *a, const void *b)
 /* one channel's newest uploads, handed to the UI thread as soon as it arrives */
 typedef struct { int uid; char chid[32]; YtList items; } FeedPart;
 
-typedef struct { Job *j; volatile LONG next, done, fails; } FeedRun;
+typedef struct { Job *j; volatile LONG next, done, fails, fallbacks; } FeedRun;
 
-#define FEED_WORKERS 3
+#define FEED_WORKERS 2
+#define FEED_FALLBACK_MAX 8   /* channel-page fallbacks per refresh (YouTube flags bursts as bots) */
 static DWORD WINAPI feed_worker(LPVOID arg)
 {
 	FeedRun *fr = (FeedRun *)arg;
@@ -876,11 +877,13 @@ static DWORD WINAPI feed_worker(LPVOID arg)
 		part = (FeedPart *)calloc(1, sizeof(FeedPart));
 		part->uid = j->uid;
 		strcpy(part->chid, j->subs[i].chid);
+		if (i >= FEED_WORKERS) Sleep(250);   /* spread requests: bursts trigger YouTube's bot check */
 		if (!yt_rss(j->subs[i].chid, &part->items, &nm, &ctl)) {
-			/* feed unavailable: fall back to the channel page */
+			/* feed unavailable: fall back to the channel page (a few times only) */
 			yt_list_free(&part->items);
 			memset(&part->items, 0, sizeof part->items);
-			if (!yt_channel(j->subs[i].chid, NULL, &part->items, &nm, &ctl)) InterlockedIncrement((LONG *)&fr->fails);
+			if (InterlockedIncrement((LONG *)&fr->fallbacks) > FEED_FALLBACK_MAX ||
+			    !yt_channel(j->subs[i].chid, NULL, &part->items, &nm, &ctl)) InterlockedIncrement((LONG *)&fr->fails);
 		}
 		for (k = 0; k < part->items.n; k++) {
 			YtItem *it = &part->items.items[k];

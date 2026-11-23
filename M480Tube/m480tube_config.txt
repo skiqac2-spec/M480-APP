@@ -32,6 +32,7 @@ version=1.65.10
 id=28
 ua=com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip
 url=https://www.youtube.com/youtubei/v1/player?prettyPrint=false
+visitor_url=https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false
 client_extra="deviceMake":"Oculus","deviceModel":"Quest 3","androidSdkVersion":32,"osName":"Android","osVersion":"12L"
 headers=X-YouTube-Client-Name: 28|X-YouTube-Client-Version: 1.65.10
 media_post=0

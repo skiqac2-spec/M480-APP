@@ -70,6 +70,7 @@ static const char *g_builtin =
 	"id=28\n"
 	"ua=com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip\n"
 	"url=https://www.youtube.com/youtubei/v1/player?prettyPrint=false\n"
+	"visitor_url=https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false\n"
 	"client_extra=\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\"\n"
 	"headers=X-YouTube-Client-Name: 28|X-YouTube-Client-Version: 1.65.10\n"
 	"media_post=0\n"
@@ -811,7 +812,9 @@ int yt_parse_player(const char *body, int len, int quality, YtStreams *out)
 	if (!st || strcmp(st, "OK")) {
 		const char *why = jpstr(root, "playabilityStatus.reason");
 		if (!why) why = jpstr(root, "playabilityStatus.messages.0");
-		_snprintf(out->err, sizeof out->err, "재생 불가: %s", why ? why : (st ? st : "알 수 없음"));
+		if (why && (strstr(why, "\xEB\xB4\x87") /* 봇 */ || strstr(why, "bot")))
+			_snprintf(out->err, sizeof out->err, "유튜브가 이 인터넷 연결을 봇으로 의심해 막았습니다. 잠시 뒤 다시 하거나 Wi-Fi/데이터를 바꿔 보세요.");
+		else _snprintf(out->err, sizeof out->err, "재생 불가: %s", why ? why : (st ? st : "알 수 없음"));
 		json_free(d);
 		{ free(f); return 0; }
 	}
