@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.9.1"
+#define VERSION   "2.9.2"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 

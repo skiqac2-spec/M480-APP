@@ -909,7 +909,23 @@ int yt_streams(const char *id, int quality, YtStreams *out, NetCtl *ctl)
 	return yt_streams_from(id, quality, 0, out, ctl);
 }
 
+static int streams_round(const char *id, int quality, int first_client, YtStreams *out, NetCtl *ctl, int fresh);
+
+/* YouTube's "confirm you're not a bot" check is often random per request:
+   when every client got it, wait a moment and go round once more with fresh visitorData */
 int yt_streams_from(const char *id, int quality, int first_client, YtStreams *out, NetCtl *ctl)
+{
+	int r = streams_round(id, quality, first_client, out, ctl, 0);
+	if (!r && !(ctl && ctl->abort) && strstr(out->err, "\xEB\xB4\x87")) {   /* 봇 */
+		tube_log("bot check: retrying");
+		Sleep(1500);
+		yt_streams_free(out);
+		r = streams_round(id, quality, first_client, out, ctl, 1);
+	}
+	return r;
+}
+
+static int streams_round(const char *id, int quality, int first_client, YtStreams *out, NetCtl *ctl, int fresh)
 {
 	int ci, n;
 	char lasterr[400] = "";
@@ -933,7 +949,7 @@ int yt_streams_from(const char *id, int quality, int first_client, YtStreams *ou
 				EnterCriticalSection(&g_ycs);
 				if (ci < g_nplayer && !strcmp(g_player[ci].name, c->name)) strcpy(c->visitor, g_player[ci].visitor);
 				LeaveCriticalSection(&g_ycs);
-				if (!c->visitor[0] || attempt > 0) {
+				if (!c->visitor[0] || attempt > 0 || (fresh && attempt == 0)) {
 					c->visitor[0] = 0;
 					if (!fetch_visitor(c, ctl, lasterr, sizeof lasterr)) break;
 					EnterCriticalSection(&g_ycs);
