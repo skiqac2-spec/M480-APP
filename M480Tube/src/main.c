@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "2.4"
+#define VERSION   "2.5"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -1441,6 +1441,13 @@ static void start_config_update(int verbose)
    (the Takeout file may be named subscriptions.csv, 구독정보.csv, ...) */
 typedef struct { int added, found, files, scanned; char checked[400]; } ImportScan;
 
+static int name_has(const WCHAR *name, const WCHAR *sub)
+{
+	int n = (int)wcslen(sub), i;
+	for (i = 0; name[i]; i++) if (!_wcsnicmp(name + i, sub, n)) return 1;
+	return 0;
+}
+
 /* walks the file system (not \\Windows) for *.csv with channel ids, depth-limited */
 static void import_scan_dir(const WCHAR *dir, int depth, ImportScan *st)
 {
@@ -1467,7 +1474,10 @@ static void import_scan_dir(const WCHAR *dir, int depth, ImportScan *st)
 			continue;
 		}
 		dot = wcsrchr(fd.cFileName, L'.');
-		if (!dot || _wcsicmp(dot, L".csv")) continue;
+		/* .csv files, or files named like an export even if the extension got lost
+		   (e.g. "subscriptions." after a rename on the phone) */
+		if ((!dot || _wcsicmp(dot, L".csv")) && !name_has(fd.cFileName, L"subscri") && !name_has(fd.cFileName, L"\uAD6C\uB3C5")) continue;
+		if (!_wcsnicmp(fd.cFileName, L"m480tube", 8)) continue;
 		if (fd.nFileSizeLow > 2 * 1024 * 1024) continue;
 		{
 			int f = 0, r = subs_import_file(path, &f);
