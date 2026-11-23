@@ -35,6 +35,7 @@ void net_shutdown(void);
 void net_set_ua(const char *ua);
 const char *net_get_ua(void);
 void net_allow_insecure(const char *host);
+void net_allow_insecure_all(int on);
 void net_cancel(NetCtl *c);
 void net_set_auth(const char *host, const char *token);
 long net_time_offset(void);

@@ -132,6 +132,10 @@ const char *net_get_ua(void) { return g_ua; }
 /* ------------------------------------------------------------------ */
 static char g_insecure[16][128];
 static int g_ninsecure;
+static int g_insecure_all;
+
+/* skip certificate checks for every host (image viewer: "ignore security") */
+void net_allow_insecure_all(int on) { g_insecure_all = on; }
 
 void net_allow_insecure(const char *host)
 {
@@ -141,7 +145,7 @@ void net_allow_insecure(const char *host)
 }
 static int is_insecure(const char *host)
 {
-	int i, r = 0;
+	int i, r = g_insecure_all;
 	EnterCriticalSection(&g_cs);
 	for (i = 0; i < g_ninsecure; i++) if (strcmp(g_insecure[i], host) == 0) r = 1;
 	LeaveCriticalSection(&g_cs);
@@ -719,7 +723,7 @@ static int decompress(HttpResp *r, const char *enc)
 	if (!out) return 0;
 	buf_free(&r->body);
 	buf_add(&r->body, out, outlen);
-	free(out);
+	stbi_image_free(out);
 	return 1;
 }
 

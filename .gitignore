@@ -8,3 +8,5 @@ M480Music/res.o
 # 정품 데이터로 만든 파일은 절대 올리지 않음
 *.pak
 *.mpq
+M480Comic/build/
+M480Comic/out/
