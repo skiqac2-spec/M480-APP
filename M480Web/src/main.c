@@ -17,6 +17,8 @@ int img_decode(const unsigned char *data, int len, int maxw, Img *im);
 #define WM_APP_LOADED   (WM_APP + 1)
 #define WM_APP_PROGRESS (WM_APP + 2)
 #define WM_APP_IMGDONE  (WM_APP + 3)
+#define WM_APP_TRDONE   (WM_APP + 4)
+#define WM_APP_TRPROG   (WM_APP + 5)
 
 #define ID_ADDR     100
 #define ID_FIELD    101
@@ -37,7 +39,7 @@ int img_decode(const unsigned char *data, int len, int maxw, Img *im);
 
 enum { M_HOME = 1000, M_RELOAD, M_ADDBM, M_BOOKMARKS, M_HISTORY, M_SIMPLE, M_IMAGES, M_INFO, M_COOKIES, M_EXIT,
        M_FONT0, M_FONT1, M_FONT2, M_FONT3, M_UA0, M_UA1, M_UA2, M_UA3, M_TOP, M_BOTTOM,
-       M_LOPEN, M_LCOPY, M_LSIMPLE, M_LSAVEIMG, M_ADDSC, M_EDITSC, M_FILES };
+       M_LOPEN, M_LCOPY, M_LSIMPLE, M_LSAVEIMG, M_ADDSC, M_EDITSC, M_FILES, M_TRANSLATE, M_AUTOTR };
 
 static const char *g_uas[4] = {
 	"Opera/9.80 (J2ME/MIDP; Opera Mini/9.80 (S60; SymbOS; Opera Mobi/23.348; U; ko) Presto/2.5.25 Version/10.54",
@@ -61,6 +63,7 @@ static char g_status[200];
 static int g_loading;
 static volatile LONG g_gen;
 static int g_set_font = 1, g_set_ua = 0;
+static int g_autotr;   /* translate foreign pages automatically */
 #define DEFAULT_REPO "https://raw.githubusercontent.com/skiqac2-spec/M480-APP/main/downloads/files.txt"
 static char g_repo[400] = DEFAULT_REPO;
 static char g_token[160];
@@ -90,6 +93,10 @@ static Job *g_job;
 
 /* image loader */
 static NetCtl *g_imgctl;
+static NetCtl *g_trctl;       /* running translation */
+static int g_tr_skip_auto;    /* next page load: don't auto-translate ("원문 보기") */
+static void translate_page(void);
+static int doc_is_foreign(Doc *d);
 
 /* view interaction */
 static int g_down, g_dragging, g_down_x, g_down_y, g_last_y, g_press_link = -1, g_press_ctl = -1;
@@ -121,6 +128,7 @@ static void settings_load(void)
 		if (!strncmp(line, "font=", 5)) g_set_font = atoi(line + 5) & 3;
 		else if (!strncmp(line, "images=", 7)) g_images_on = atoi(line + 7) ? 1 : 0;
 		else if (!strncmp(line, "ua=", 3)) g_set_ua = atoi(line + 3) & 3;
+		else if (!strncmp(line, "autotr=", 7)) g_autotr = atoi(line + 7) ? 1 : 0;
 		else if (!strncmp(line, "repo=", 5) || !strncmp(line, "token=", 6)) {
 			char *v = strchr(line, '=') + 1;
 			int n = (int)strlen(v);
@@ -138,7 +146,7 @@ static void settings_save(void)
 	app_path(p, L"settings.ini");
 	f = _wfopen(p, L"wb");
 	if (!f) return;
-	fprintf(f, "font=%d\nimages=%d\nua=%d\nrepo=%s\ntoken=%s\n", g_set_font, g_images_on, g_set_ua, g_repo, g_token);
+	fprintf(f, "font=%d\nimages=%d\nua=%d\nautotr=%d\nrepo=%s\ntoken=%s\n", g_set_font, g_images_on, g_set_ua, g_autotr, g_repo, g_token);
 	fclose(f);
 }
 
@@ -641,6 +649,7 @@ static void stop_all(void)
 	InterlockedIncrement((LONG *)&g_gen);
 	if (g_job) { g_job->ctl.abort = 1; g_job = NULL; }
 	if (g_imgctl) { g_imgctl->abort = 1; g_imgctl = NULL; }
+	if (g_trctl) { g_trctl->abort = 1; g_trctl = NULL; }
 	g_loading = 0;
 	KillTimer(g_hwnd, TM_REFRESH);
 	toolbar_invalidate();
@@ -700,6 +709,8 @@ static void install_doc(Doc *d, int mode, const char *tls)
 	start_images();
 	toolbar_invalidate();
 	if (GetFocus() != g_addr && !g_field) SetFocus(g_view);
+	if (g_tr_skip_auto) g_tr_skip_auto = 0;
+	else if (g_autotr && strncmp(d->url, "about:", 6) && doc_is_foreign(d)) translate_page();
 }
 
 static void save_download(Job *j)
@@ -2057,6 +2068,262 @@ static void go_hist(int delta)
 	toolbar_invalidate();
 }
 
+
+/* ---------------- translation (Google Translate, page text -> Korean) ---------------- */
+typedef struct {
+	Doc *doc;            /* reference held */
+	LONG gen;
+	NetCtl ctl;
+	int nrun;
+	int *first, *count;  /* item range of each run */
+	char **src;          /* UTF-8 source text per run (NULL = leave as is) */
+	char **dst;          /* translated text per run */
+	char err[160];
+} TrJob;
+static TrJob *g_tr;      /* running translation, or NULL */
+
+static int tr_is_hangul(WCHAR c) { return (c >= 0xAC00 && c <= 0xD7A3) || (c >= 0x3131 && c <= 0x318E); }
+static int tr_is_latin(WCHAR c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= 0xC0 && c <= 0x24F) || (c >= 0x400 && c <= 0x4FF); }
+
+/* does the page look foreign (mostly non-Korean letters)? */
+static int doc_is_foreign(Doc *d)
+{
+	int i, lat = 0, han = 0, other = 0;
+	for (i = 0; i < d->text.len; i++) {
+		WCHAR c = d->text.p[i];
+		if (tr_is_hangul(c)) han++;
+		else if (tr_is_latin(c)) lat++;
+		else if ((c >= 0x3040 && c <= 0x30FF) || (c >= 0x4E00 && c <= 0x9FFF)) other++;
+	}
+	return (lat + other) > 150 && han * 8 < lat + other;
+}
+
+/* parse Google's [[["번역","original",...],...],...] reply: concatenate the translations */
+static char *tr_parse(const char *js, int n)
+{
+	Buf out;
+	int i = 0, depth = 0, seg_first = 0;
+	buf_init(&out);
+	while (i < n) {
+		char c = js[i];
+		if (c == '[') { depth++; if (depth == 3) seg_first = 1; i++; continue; }
+		if (c == ']') { depth--; i++; if (depth == 1) break; continue; }
+		if (c == ',') { if (depth == 3) seg_first = 0; i++; continue; }
+		if (c == '"') {
+			Buf str;
+			buf_init(&str);
+			i++;
+			while (i < n && js[i] != '"') {
+				if (js[i] == '\\' && i + 1 < n) {
+					char e = js[i + 1];
+					i += 2;
+					if (e == 'n') buf_addc(&str, '\n');
+					else if (e == 't') buf_addc(&str, '\t');
+					else if (e == 'u' && i + 4 <= n) {
+						char hx[5]; unsigned v; WCHAR w[2]; char *u8;
+						memcpy(hx, js + i, 4); hx[4] = 0;
+						v = (unsigned)strtoul(hx, NULL, 16);
+						i += 4;
+						w[0] = (WCHAR)v; w[1] = 0;
+						u8 = w_to_utf8(w, 1);
+						buf_adds(&str, u8);
+						free(u8);
+					} else buf_addc(&str, e);
+				} else buf_addc(&str, js[i++]);
+			}
+			i++;
+			if (depth == 3 && seg_first && str.p) buf_adds(&out, str.p);
+			if (depth == 3) seg_first = 0;
+			buf_free(&str);
+			continue;
+		}
+		i++;
+	}
+	return out.len ? buf_detach(&out) : (buf_free(&out), (char *)NULL);
+}
+
+static char *tr_request(const char *text, NetCtl *ctl, char *err)
+{
+	HttpResp r;
+	char *enc = url_encode(text), *res = NULL;
+	Buf body;
+	buf_init(&body);
+	buf_adds(&body, "q=");
+	buf_adds(&body, enc);
+	free(enc);
+	if (http_request("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ko&dt=t&ie=UTF-8&oe=UTF-8",
+	                 "POST", body.p, body.len, "application/x-www-form-urlencoded", NULL, &r, ctl, 2 * 1024 * 1024)) {
+		if (r.status == 200 && r.body.p) res = tr_parse(r.body.p, r.body.len);
+		else if (r.status == 429 || (r.url && strstr(r.url, "/sorry"))) strcpy(err, "번역 서버가 잠시 요청을 막았습니다. 조금 뒤 다시 해 보세요.");
+		else _snprintf(err, 150, "번역 실패 (HTTP %d)", r.status);
+	} else _snprintf(err, 150, "번역 서버 연결 실패: %.100s", r.err);
+	http_resp_free(&r);
+	buf_free(&body);
+	return res;
+}
+
+static int count_lines(const char *s) { int n = 1; for (; *s; s++) if (*s == '\n') n++; return n; }
+
+static DWORD WINAPI tr_thread(LPVOID p)
+{
+	TrJob *t = (TrJob *)p;
+	int i = 0, done = 0, total = 0;
+	for (i = 0; i < t->nrun; i++) if (t->src[i]) total++;
+	i = 0;
+	while (i < t->nrun && !t->ctl.abort && t->gen == g_gen) {
+		/* batch: runs joined by newlines, up to ~1800 characters */
+		Buf b;
+		int start = i, k, nb = 0;
+		char *res;
+		buf_init(&b);
+		while (i < t->nrun && (b.len < 1800 || nb == 0)) {
+			if (t->src[i]) {
+				if (nb) buf_addc(&b, '\n');
+				buf_adds(&b, t->src[i]);
+				nb++;
+			}
+			i++;
+		}
+		if (!nb) { buf_free(&b); continue; }
+		res = tr_request(b.p, &t->ctl, t->err);
+		buf_free(&b);
+		if (!res) break;
+		if (count_lines(res) == nb) {
+			char *line = res;
+			for (k = start; k < i; k++) {
+				char *nl;
+				if (!t->src[k]) continue;
+				nl = strchr(line, '\n');
+				t->dst[k] = nl ? xstrndup(line, (int)(nl - line)) : xstrdup(line);
+				line = nl ? nl + 1 : line + strlen(line);
+			}
+		} else {
+			/* line structure got lost: translate those runs one by one */
+			for (k = start; k < i && !t->ctl.abort; k++) {
+				char *one;
+				if (!t->src[k]) continue;
+				one = tr_request(t->src[k], &t->ctl, t->err);
+				if (one) { char *c; for (c = one; *c; c++) if (*c == '\n') *c = ' '; t->dst[k] = one; }
+			}
+		}
+		free(res);
+		done += nb;
+		if (t->gen == g_gen) PostMessageW(g_hwnd, WM_APP_TRPROG, (WPARAM)done, (LPARAM)total);
+	}
+	PostMessageW(g_hwnd, WM_APP_TRDONE, 0, (LPARAM)t);
+	return 0;
+}
+
+static void tr_free(TrJob *t)
+{
+	int i;
+	for (i = 0; i < t->nrun; i++) { free(t->src[i]); free(t->dst[i]); }
+	free(t->src); free(t->dst); free(t->first); free(t->count);
+	doc_release(t->doc);
+	free(t);
+}
+
+static void translate_page(void)
+{
+	Doc *d = g_doc;
+	TrJob *t;
+	int i, cap = 64;
+	HANDLE th;
+	if (!d || (g_tr && g_tr->gen == g_gen) || d->translated || !strncmp(d->url, "about:", 6)) return;
+	t = (TrJob *)calloc(1, sizeof(TrJob));
+	t->first = (int *)malloc(cap * sizeof(int));
+	t->count = (int *)malloc(cap * sizeof(int));
+	t->src = (char **)malloc(cap * sizeof(char *));
+	/* runs = consecutive text items (one paragraph / line of text) */
+	for (i = 0; i < d->nitems; ) {
+		int j = i, lat = 0, han = 0, k;
+		WBuf w;
+		if (d->items[i].type != IT_TEXT) { i++; continue; }
+		while (j < d->nitems && (d->items[j].type == IT_TEXT || d->items[j].type == IT_ANCHOR)) j++;
+		wbuf_init(&w);
+		for (k = i; k < j; k++) if (d->items[k].type == IT_TEXT) {
+			int q;
+			for (q = 0; q < d->items[k].len; q++) {
+				WCHAR c = d->text.p[d->items[k].text + q];
+				if (c == '\n' || c == '\r') c = ' ';
+				if (tr_is_hangul(c)) han++; else if (tr_is_latin(c)) lat++;
+				wbuf_addc(&w, c);
+			}
+		}
+		if (t->nrun == cap) {
+			cap *= 2;
+			t->first = (int *)realloc(t->first, cap * sizeof(int));
+			t->count = (int *)realloc(t->count, cap * sizeof(int));
+			t->src = (char **)realloc(t->src, cap * sizeof(char *));
+		}
+		t->first[t->nrun] = i;
+		t->count[t->nrun] = j - i;
+		t->src[t->nrun] = (lat >= 2 && han * 3 < lat && w.len) ? w_to_utf8(w.p, w.len) : NULL;
+		t->nrun++;
+		wbuf_free(&w);
+		i = j;
+	}
+	t->dst = (char **)calloc(t->nrun ? t->nrun : 1, sizeof(char *));
+	t->doc = d;
+	doc_addref(d);
+	t->gen = g_gen;
+	t->ctl.sock = (unsigned int)INVALID_SOCKET;
+	g_tr = t;
+	g_trctl = &t->ctl;
+	status_set("번역 중...");
+	th = CreateThread(NULL, THREAD_STACK, tr_thread, t, THREAD_FLAGS, NULL);
+	if (th) CloseHandle(th);
+	else { g_tr = NULL; g_trctl = NULL; tr_free(t); status_set("번역을 시작하지 못했습니다"); }
+}
+
+static void tr_apply(TrJob *t)
+{
+	Doc *d = t->doc;
+	int r, k, n = 0;
+	if (g_tr == t) g_tr = NULL;
+	if (g_trctl == &t->ctl) g_trctl = NULL;
+	if (d != g_doc || t->gen != g_gen) { tr_free(t); return; }
+	for (r = 0; r < t->nrun; r++) {
+		WCHAR *w;
+		int wl, link = -2, first = -1;
+		unsigned short style = 0;
+		if (!t->dst[r]) continue;
+		w = utf8_to_w(t->dst[r], -1, &wl);
+		if (!w) continue;
+		for (k = t->first[r]; k < t->first[r] + t->count[r]; k++) {
+			Item *it = &d->items[k];
+			if (it->type != IT_TEXT) continue;
+			if (first < 0) { first = k; style = it->style; }
+			if (it->len > 0 && !(it->len == 1 && d->text.p[it->text] == ' ')) {
+				if (link == -2) link = it->link; else if (link != it->link) link = -1;
+			}
+		}
+		if (first < 0) { free(w); continue; }
+		for (k = t->first[r]; k < t->first[r] + t->count[r]; k++) if (d->items[k].type == IT_TEXT) d->items[k].len = 0;
+		{
+			Item *it = &d->items[first];
+			it->text = d->text.len;
+			wbuf_add(&d->text, w, wl);
+			it->len = wl;
+			it->link = link < 0 ? -1 : link;
+			it->style = it->link >= 0 ? style : (unsigned short)(style & ~(S_LINK | S_U));
+		}
+		free(w);
+		n++;
+	}
+	if (n) {
+		d->translated = 1;
+		relayout(1);
+		status_set(t->err[0] ? "일부만 번역됨 - 메뉴 > 원문 보기로 되돌릴 수 있음" : "번역 완료 (메뉴 > 원문 보기로 되돌리기)");
+	} else if (t->err[0]) {
+		WCHAR *e = utf8_to_w(t->err, -1, NULL);
+		status_set(t->err);
+		MessageBoxW(g_hwnd, e, L"번역", MB_OK | MB_ICONEXCLAMATION);
+		free(e);
+	} else status_set("번역할 외국어 글이 없습니다");
+	tr_free(t);
+}
+
 static void show_menu(void)
 {
 	HMENU m = CreatePopupMenu(), fm = CreatePopupMenu(), um = CreatePopupMenu();
@@ -2069,6 +2336,10 @@ static void show_menu(void)
 	for (i = 0; i < 4; i++) AppendMenuW(um, MF_STRING | (g_set_ua == i ? MF_CHECKED : 0), M_UA0 + i, uas[i]);
 	AppendMenuW(m, MF_STRING, M_HOME, L"\xD648");
 	AppendMenuW(m, MF_STRING, M_RELOAD, L"\xC0C8\xB85C\xACE0\xCE68");
+	if (g_doc && g_doc->translated) AppendMenuW(m, MF_STRING, M_TRANSLATE, L"원문 보기 (번역 끄기)");
+	else AppendMenuW(m, MF_STRING | (g_trctl ? MF_GRAYED : 0), M_TRANSLATE, g_trctl ? L"번역 중..." : L"한국어로 번역");
+	AppendMenuW(m, MF_STRING | (g_autotr ? MF_CHECKED : 0), M_AUTOTR, L"외국어 페이지 자동 번역");
+	AppendMenuW(m, MF_SEPARATOR, 0, NULL);
 	AppendMenuW(m, MF_STRING, M_ADDBM, L"\xC990\xACA8\xCC3E\xAE30 \xCD94\xAC00");
 	AppendMenuW(m, MF_STRING, M_FILES, L"내 파일함 (GitHub)");
 	AppendMenuW(m, MF_STRING, M_ADDSC, L"바로가기에 추가");
@@ -2224,6 +2495,15 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 			return 0;
 		case M_EDITSC: navigate("about:shortcuts", NULL, 0, NULL, NAV_NEW); return 0;
 		case M_FILES: navigate("about:files", NULL, 0, NULL, NAV_NEW); return 0;
+		case M_TRANSLATE:
+			if (g_doc && g_doc->translated) { g_tr_skip_auto = 1; navigate(g_doc->url, NULL, 0, NULL, NAV_RELOAD); }
+			else translate_page();
+			return 0;
+		case M_AUTOTR:
+			g_autotr = !g_autotr;
+			settings_save();
+			if (g_autotr && g_doc && !g_doc->translated && strncmp(g_doc->url, "about:", 6) && doc_is_foreign(g_doc)) translate_page();
+			return 0;
 		case M_BOOKMARKS: navigate("about:bookmarks", NULL, 0, NULL, NAV_NEW); return 0;
 		case M_HISTORY: navigate("about:history", NULL, 0, NULL, NAV_NEW); return 0;
 		case M_SIMPLE: if (g_doc && strncmp(g_doc->url, "about:", 6)) open_simplified(g_doc->url); return 0;
@@ -2293,6 +2573,14 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		status_set(s);
 		return 0;
 	}
+	case WM_APP_TRPROG: {
+		char st[80];
+		if (g_tr) { _snprintf(st, sizeof st, "번역 중... %d / %d", (int)w, (int)l); status_set(st); }
+		return 0;
+	}
+	case WM_APP_TRDONE:
+		tr_apply((TrJob *)l);
+		return 0;
 	case WM_APP_IMGDONE:
 		if ((LONG)w == g_gen) SetTimer(h, TM_RELAYOUT, 300, NULL);
 		return 0;

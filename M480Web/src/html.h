@@ -79,6 +79,7 @@ typedef struct Doc {
 	Anchor *anchors; int nanchors, capanchors;
 	char *refresh_url; int refresh_delay;
 	volatile LONG refs;
+	int translated;   /* text replaced by a Korean translation */
 } Doc;
 
 Doc *html_parse(const char *bytes, int len, const char *url, const char *charset_hint, int is_text);
