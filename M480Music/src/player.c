@@ -44,8 +44,9 @@ typedef struct {
     int lastIndex;
     DWORD lastPosMs;
     int autoLevel;  /* 자동 모드가 마지막으로 정한 단계 */
-    int compact;    /* 1=버튼 줄 숨김 */
-    int panel;      /* 1=설정 버튼 펼침 */
+    int compact;    /* (예전 버전: 버튼 숨김, 지금은 안 씀) */
+    int panel;      /* 보관함 보기: 0=노래 1=폴더 */
+    int btMode;     /* 블루투스: 0=자동 감지 1=항상 켬 2=끔 */
 } Settings;
 #define SET_MAGIC 0x4D343831 /* 'M481' */
 
@@ -75,6 +76,8 @@ typedef struct {
     int loadPct;
     DWORD limiterHits;
     int openFailed;
+    int bt;              /* 블루투스 호환 출력 중 */
+    int btDetected;
 } Status;
 static Status g_st;
 
@@ -153,6 +156,12 @@ typedef struct {
     int underrunsWindow;
     DWORD underrunTick;
     DWORD busyMs, audioMsDone;
+
+    /* 블루투스/출력 장치 변화 대응 */
+    UINT devCount, devBase;
+    int btDetected;
+    DWORD lastPoll, lastDone;
+    int needReopen;
 } Audio;
 static Audio A;
 
@@ -208,9 +217,53 @@ static int level_now(void)
     return g_set.qmode - 1;
 }
 
+/* 블루투스 오디오(A2DP) 장치가 있는지: 장치 이름으로 찾고, 못 찾으면
+ * 앱 시작 때보다 출력 장치 수가 늘었는지로 판단 */
+static int lc_has(const wchar_t *s, const char *needle)
+{
+    int i, j;
+    for (i = 0; s[i]; i++) {
+        for (j = 0; needle[j]; j++) {
+            wchar_t c = s[i + j];
+            if (c >= L'A' && c <= L'Z') c = (wchar_t)(c + 32);
+            if (!c || c != (wchar_t)needle[j]) break;
+        }
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+static int bt_detect(UINT n)
+{
+    UINT i;
+    for (i = 0; i < n && i < 16; i++) {
+        WAVEOUTCAPS wc;
+        memset(&wc, 0, sizeof(wc));
+        if (waveOutGetDevCaps(i, &wc, sizeof(wc)) == MMSYSERR_NOERROR) {
+            const wchar_t *nm = wc.szPname;
+            if (lc_has(nm, "bluetooth") || lc_has(nm, "a2dp") || lc_has(nm, "bt ") || lc_has(nm, "bt_") ||
+                wcsstr(nm, L"블루투스")) return 1;
+        }
+    }
+    return n > A.devBase;
+}
+
+static int bt_active(void)
+{
+    if (g_set.btMode == 1) return 1;
+    if (g_set.btMode == 2) return 0;
+    return A.btDetected;
+}
+
 static void choose_format(int lvl, int *rate, int *ch)
 {
     int r = g_levels[lvl].rate, c = g_levels[lvl].ch;
+    if (bt_active()) {
+        /* 블루투스(SBC)는 44.1kHz 스테레오가 가장 확실함.
+         * 22k/모노/11k를 받으면 무음이 되는 드라이버가 있음 */
+        *rate = 44100; *ch = 2;
+        return;
+    }
     if (A.src.rate < r) {
         /* 원본이 더 낮으면 원본 레이트 그대로(가까운 표준값) */
         r = A.src.rate;
@@ -293,6 +346,7 @@ static void restart_output(DWORD posMs)
     A.baseMs = posMs;
     A.framesWritten = 0;
     A.primed = 0;
+    A.lastDone = GetTickCount();
     waveOutPause(A.hwo);
     for (i = 0; i < NBUF && !A.eof; i++) {
         int n = fill_one(i);
@@ -316,25 +370,35 @@ static void publish(void)
     g_st.outCh = A.outCh;
     g_st.level = A.curLevel;
     g_st.limiterHits = A.dsp.clipCount;
+    g_st.bt = bt_active();
+    g_st.btDetected = A.btDetected;
     LeaveCriticalSection(&g_cs);
 }
 
-/* 형식 변경(음질 변경/자동 하향) - 현재 위치 유지 */
-static void reconfigure(void)
+static int open_any(int rate, int ch)
+{
+    return out_open(rate, ch) || out_open(44100, 2) || out_open(22050, 2) || out_open(11025, 1);
+}
+
+/* 형식 변경(음질 변경/자동 하향/장치 변경) - 현재 위치 유지
+ * force=1 이면 같은 형식이어도 장치를 다시 열어 새 출력 장치(블루투스 등)로 연결 */
+static void reconfigure2(int force)
 {
     int rate, ch;
     DWORD pos;
     if (!A.playing || !A.srcOpen) return;
     pos = cur_pos_ms();
     choose_format(level_now(), &rate, &ch);
-    if (!out_open(rate, ch)) {
-        if (!out_open(22050, 2) && !out_open(11025, 1)) { A.playing = 0; g_st.openFailed = 1; return; }
-    }
+    if (force) out_close();
+    if (!open_any(rate, ch)) { A.playing = 0; g_st.openFailed = 1; return; }
     setup_dsp();
     A.eof = 0;
     src_seek_ms(&A.src, pos);
     restart_output(pos);
+    A.needReopen = 0;
 }
+
+static void reconfigure(void) { reconfigure2(0); }
 
 static void start_track(int index, DWORD startMs)
 {
@@ -350,13 +414,14 @@ static void start_track(int index, DWORD startMs)
     }
     A.srcOpen = 1;
     choose_format(level_now(), &rate, &ch);
-    if (!out_open(rate, ch)) {
-        if (!out_open(22050, 2) && !out_open(11025, 1)) {
-            g_st.openFailed = 1;
-            src_close(&A.src); A.srcOpen = 0;
-            return;
-        }
+    /* 곡마다 장치를 새로 열어야 그 사이 연결된 블루투스로 소리가 감 */
+    out_close();
+    if (!open_any(rate, ch)) {
+        g_st.openFailed = 1;
+        src_close(&A.src); A.srcOpen = 0;
+        return;
     }
+    A.needReopen = 0;
     g_st.openFailed = 0;
     setup_dsp();
     if (startMs > 0) src_seek_ms(&A.src, startMs);
@@ -371,7 +436,7 @@ static void start_track(int index, DWORD startMs)
 static void auto_drop(const char *why)
 {
     (void)why;
-    if (g_set.qmode != 0 || A.curLevel >= 3) return;
+    if (g_set.qmode != 0 || A.curLevel >= 3 || bt_active()) return;
     A.curLevel++;
     g_set.autoLevel = A.curLevel;
     A.underrunsWindow = 0;
@@ -395,7 +460,13 @@ static void service(void)
         A.underrunsWindow++;
         if (A.underrunsWindow >= 2) { auto_drop("underrun"); return; }
     }
-    if (freed) A.primed = 1;
+    if (freed) { A.primed = 1; A.lastDone = GetTickCount(); }
+    else if (queuedNow > 0 && GetTickCount() - A.lastDone > 4000) {
+        /* 4초 넘게 버퍼가 하나도 안 끝남 = 출력 장치가 바뀌었거나 멈춤 → 다시 열기 */
+        g_st.underruns++;
+        reconfigure2(1);
+        return;
+    }
 
     for (i = 0; i < NBUF && !A.eof; i++) {
         if (!A.queued[i]) {
@@ -431,6 +502,12 @@ static DWORD WINAPI audio_thread(LPVOID unused)
     (void)unused;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     A.curLevel = (g_set.autoLevel >= 0 && g_set.autoLevel <= 3) ? g_set.autoLevel : 1;
+    A.devCount = A.devBase = waveOutGetNumDevs();
+    /* 이미 블루투스가 연결된 상태로 시작했을 수 있으므로 이름으로 확인 */
+    A.devBase = 0xFFFF;
+    A.btDetected = bt_detect(A.devCount);
+    A.devBase = A.btDetected ? A.devCount - 1 : A.devCount;
+    A.lastPoll = GetTickCount();
     for (;;) {
         Cmd c;
         int have;
@@ -451,7 +528,10 @@ static DWORD WINAPI audio_thread(LPVOID unused)
                 break;
             case CMD_PAUSE:
                 if (A.playing && A.hwo) {
-                    if (A.paused) { waveOutRestart(A.hwo); A.paused = 0; power_keep(1); }
+                    if (A.paused) {
+                        A.paused = 0; power_keep(1);
+                        if (A.needReopen) reconfigure2(1); else waveOutRestart(A.hwo);
+                    }
                     else { waveOutPause(A.hwo); A.paused = 1; power_keep(0); }
                 }
                 break;
@@ -470,10 +550,11 @@ static DWORD WINAPI audio_thread(LPVOID unused)
                 break;
             case CMD_RECONFIG:
                 if (g_set.qmode != 0) A.curLevel = g_set.qmode - 1;
-                else if (c.index >= 0) A.curLevel = c.index;   /* 자동으로 되돌릴 때 '보통'부터 */
+                else if (c.index >= 0) A.curLevel = c.index;
+                if (c.index == -2) A.btDetected = bt_detect(A.devCount);   /* 자동으로 되돌릴 때 '보통'부터 */
                 if (A.playing) {
-                    /* 레벨/이어폰 모드 변경도 여기서 반영 */
-                    reconfigure();
+                    /* 레벨/이어폰/블루투스 모드 변경도 여기서 반영 */
+                    reconfigure2(c.index == -2);
                 }
                 break;
             case CMD_QUIT:
@@ -481,6 +562,20 @@ static DWORD WINAPI audio_thread(LPVOID unused)
                 if (A.srcOpen) src_close(&A.src);
                 power_keep(0);
                 return 0;
+            }
+        }
+        /* 1.5초마다 출력 장치 수 확인 (블루투스 연결/해제 감지) */
+        if (GetTickCount() - A.lastPoll > 1500) {
+            UINT n = waveOutGetNumDevs();
+            A.lastPoll = GetTickCount();
+            if (n != A.devCount) {
+                A.devCount = n;
+                A.btDetected = bt_detect(n);
+                /* 장치가 바뀌면 지금 위치에서 다시 열어 새 장치로 소리를 보냄 */
+                if (A.playing) {
+                    if (A.paused) A.needReopen = 1;
+                    else reconfigure2(1);
+                }
             }
         }
         if (A.playing && !A.paused && A.hwo) service();
@@ -656,6 +751,7 @@ static void load_settings(void)
         if (g_set.order < 0 || g_set.order > 2) g_set.order = 0;
         if (g_set.autoLevel < 0 || g_set.autoLevel > 3) g_set.autoLevel = 1;
         g_set.compact = g_set.compact ? 1 : 0;
+        if (g_set.btMode < 0 || g_set.btMode > 2) g_set.btMode = 0;
         g_set.panel = g_set.panel ? 1 : 0;
     }
 }
@@ -1193,7 +1289,8 @@ static void layout(void)
 }
 
 static int list_content_h(void) { return L_listTop + lib_count() * L_rowH; }
-static int set_rows(void) { return 7; }
+static int set_rows(void) { return 8; }
+#define SET_GAP_Y(i) ((i) >= 5 ? S(14) : 0) + ((i) >= 7 ? S(14) : 0)
 #define SET_ROWH S(40)
 #define SET_TOP  S(48)
 
@@ -1201,7 +1298,7 @@ static int max_scroll(int scr)
 {
     int m = 0;
     if (scr == SCR_LIB) m = list_content_h() - L_listBot;
-    if (scr == SCR_SET) m = SET_TOP + set_rows() * SET_ROWH + S(40) - H;
+    if (scr == SCR_SET) m = SET_TOP + set_rows() * SET_ROWH + S(28) + S(40) - H;
     return m > 0 ? m : 0;
 }
 
@@ -1507,11 +1604,16 @@ static void set_row_text(int i, const Status *st, const wchar_t **label, wchar_t
     case 1: *label = L"출력 모드"; wcscpy(val, g_set.earphone ? L"이어폰" : L"스피커"); break;
     case 2: *label = L"소리 크기"; wcscpy(val, g_levelPctName[g_set.levelIdx & 3]); break;
     case 3: *label = L"재생 순서"; wcscpy(val, g_orderName[g_set.order % 3]); break;
-    case 4: *label = L"음악 목록 새로고침"; wsprintfW(val, L"%d곡", g_fileCount); break;
-    case 5: *label = L"출력"; *kind = 1;
+    case 4: *label = L"블루투스";
+        if (g_set.btMode == 1) wcscpy(val, L"항상 켬");
+        else if (g_set.btMode == 2) wcscpy(val, L"끔");
+        else wcscpy(val, st->btDetected ? L"자동 (연결됨)" : L"자동");
+        break;
+    case 5: *label = L"음악 목록 새로고침"; wsprintfW(val, L"%d곡", g_fileCount); break;
+    case 6: *label = L"출력"; *kind = 1;
         if (st->openFailed) wcscpy(val, L"오디오 장치 오류");
         else if (st->srcType)
-            wsprintfW(val, L"%d.%dkHz %s · 끊김 %d", st->outRate / 1000, (st->outRate % 1000) / 100,
+            wsprintfW(val, L"%s%d.%dkHz %s · 끊김 %d", st->bt ? L"BT " : L"", st->outRate / 1000, (st->outRate % 1000) / 100,
                       st->outCh == 2 ? L"스테레오" : L"모노", st->underruns);
         else wcscpy(val, L"-");
         break;
@@ -1526,14 +1628,14 @@ static void paint_set(HDC dc, const Status *st)
     SetBkMode(dc, TRANSPARENT);
 
     /* 그룹 카드 */
-    rrect(dc, S(10), y0, W - S(20), 4 * SET_ROWH, S(10), C_CARD);
-    rrect(dc, S(10), y0 + 4 * SET_ROWH + S(14), W - S(20), 2 * SET_ROWH, S(10), C_CARD);
-    rrect(dc, S(10), y0 + 6 * SET_ROWH + S(28), W - S(20), SET_ROWH, S(10), C_CARD);
+    rrect(dc, S(10), y0, W - S(20), 5 * SET_ROWH, S(10), C_CARD);
+    rrect(dc, S(10), y0 + 5 * SET_ROWH + S(14), W - S(20), 2 * SET_ROWH, S(10), C_CARD);
+    rrect(dc, S(10), y0 + 7 * SET_ROWH + S(28), W - S(20), SET_ROWH, S(10), C_CARD);
     for (i = 0; i < set_rows(); i++) {
         const wchar_t *label;
         wchar_t val[64];
         int kind;
-        int ry = y0 + i * SET_ROWH + (i >= 4 ? S(14) : 0) + (i >= 6 ? S(14) : 0);
+        int ry = y0 + i * SET_ROWH + SET_GAP_Y(i);
         set_row_text(i, st, &label, val, &kind);
         if (i == t_pressRow && kind != 1) rrect(dc, S(10), ry, W - S(20), SET_ROWH, S(10), C_PRESS);
         if (kind == 2) {
@@ -1547,9 +1649,9 @@ static void paint_set(HDC dc, const Status *st)
         } else {
             text(dc, val, S(70), ry, W - S(94), SET_ROWH, fSmall, C_SUB, TR | DT_END_ELLIPSIS);
         }
-        if (i != 3 && i != 5 && i != 6) fill(dc, S(24), ry + SET_ROWH - 1, W - S(34), 1, C_SEP);
+        if (i != 4 && i != 6 && i != 7) fill(dc, S(24), ry + SET_ROWH - 1, W - S(34), 1, C_SEP);
     }
-    text(dc, L"이어폰에서 소리가 깨지면 '소리 크기'를 줄이세요", S(16), y0 + 7 * SET_ROWH + S(34), W - S(32), S(18), fSmall, C_DIM, TC | DT_END_ELLIPSIS);
+    text(dc, L"이어폰에서 소리가 깨지면 '소리 크기'를 줄이세요", S(16), y0 + 8 * SET_ROWH + S(34), W - S(32), S(18), fSmall, C_DIM, TC | DT_END_ELLIPSIS);
 
     /* 머리말 */
     fill(dc, 0, 0, W, SET_TOP - S(6), C_BG);
@@ -1732,8 +1834,9 @@ static void set_action(int row)
     case 1: g_set.earphone = !g_set.earphone; post_cmd(CMD_RECONFIG, -1, 0); break;
     case 2: g_set.levelIdx = (g_set.levelIdx + 1) & 3; post_cmd(CMD_RECONFIG, -1, 0); break;
     case 3: g_set.order = (g_set.order + 1) % 3; break;
-    case 4: g_scr = SCR_LIB; do_rescan(); break;
-    case 6: DestroyWindow(g_hwnd); return;
+    case 4: g_set.btMode = (g_set.btMode + 1) % 3; post_cmd(CMD_RECONFIG, -2, 0); break;
+    case 5: g_scr = SCR_LIB; do_rescan(); break;
+    case 7: DestroyWindow(g_hwnd); return;
     }
     save_settings();
     redraw();
@@ -1761,7 +1864,7 @@ static int set_row_at(int y)
 {
     int i, y0 = SET_TOP - g_scroll[SCR_SET];
     for (i = 0; i < set_rows(); i++) {
-        int ry = y0 + i * SET_ROWH + (i >= 4 ? S(14) : 0) + (i >= 6 ? S(14) : 0);
+        int ry = y0 + i * SET_ROWH + SET_GAP_Y(i);
         if (y >= ry && y < ry + SET_ROWH) return i;
     }
     return -1;
@@ -1950,7 +2053,7 @@ static void on_up(int x, int y)
     else if (g_scr == SCR_NOW) tap_now(x, y);
     else {
         if (y < SET_TOP - S(6)) { if (x < S(80)) go(g_curIndex >= 0 ? SCR_NOW : SCR_LIB); }
-        else { int r = set_row_at(y); if (r >= 0 && r != 5) set_action(r); }
+        else { int r = set_row_at(y); if (r >= 0 && r != 6) set_action(r); }
     }
     redraw();
 }
