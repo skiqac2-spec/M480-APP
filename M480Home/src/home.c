@@ -33,7 +33,7 @@
 
 #define APP_CLASS L"M480HomeWnd"
 #define APP_TITLE L"M480 홈"
-#define APP_VER   L"1.2.1"
+#define APP_VER   L"1.3"
 
 #ifndef VK_OFF
 #define VK_OFF 0xDF
@@ -105,7 +105,9 @@ static struct {
     int wallType;       /* 0 없음, 1..: 기본 배경, WALL_PHOTO: 사진 */
     int wallDim;        /* 0 그대로, 1 조금, 2 많이 어둡게 */
     wchar_t wallPath[MAX_PATH];
-} g_set = { 1, 0, 1, 1, 1, L"" };
+    int addPos;         /* '앱 추가' 칸 자리 (-1: 첫 빈칸) */
+} g_set = { 1, 0, 1, 1, 1, L"", -1 };
+#define LIFT_ADD 999        /* g_lift 값: '앱 추가' 칸을 들어 올림 */
 #define WALL_PHOTO 100
 
 /* 화면 */
@@ -130,7 +132,7 @@ static void grid_dims(int *cols, int *rows);
 
 /* 눌림 영역 */
 enum {
-    H_NONE, H_TILE, H_EMPTY, H_QWIFI, H_QBT, H_WDIM, H_WPRESET, H_WPIC, H_NAV_ALL, H_NAV_RUN, H_NAV_SET, H_BACK, H_ROW, H_CLOSE, H_CLOSEALL,
+    H_NONE, H_TILE, H_EMPTY, H_ADDTILE, H_QWIFI, H_QBT, H_WDIM, H_WPRESET, H_WPIC, H_NAV_ALL, H_NAV_RUN, H_NAV_SET, H_BACK, H_ROW, H_CLOSE, H_CLOSEALL,
     H_VOLDN, H_VOLUP, H_OFF, H_OPT, H_MENU, H_MENU_BG, H_DOT, H_DONE
 };
 typedef struct { RECT r; int id, arg; } Hit;
@@ -468,6 +470,11 @@ static int first_free(int from)
     while (fav_at(p) >= 0) p++;
     return p;
 }
+static int add_pos(void)
+{
+    if (g_set.addPos >= 0 && fav_at(g_set.addPos) < 0) return g_set.addPos;
+    return first_free(0);
+}
 static int per_page(void)
 {
     int c, r;
@@ -480,7 +487,12 @@ static int fav_add(const App *a)
     g_fav[g_favN] = *a;
     g_fav[g_favN].icon = NULL;
     g_fav[g_favN].iconTried = 0;
-    g_fav[g_favN].pos = first_free(g_addFrom);
+    {
+        /* '앱 추가' 칸 자리는 비켜서 넣음 (그 칸이 계속 그 자리에 있도록) */
+        int p = g_addFrom < 0 ? 0 : g_addFrom;
+        while (fav_at(p) >= 0 || p == g_set.addPos) p++;
+        g_fav[g_favN].pos = p;
+    }
     g_favN++;
     return 1;
 }
@@ -505,6 +517,10 @@ static void regrid(int oldGrid, int newGrid)
         else { g_fav[i].pos = -1000 - i; lost[nl++] = i; }
     }
     for (i = 0; i < nl; i++) g_fav[lost[i]].pos = first_free(0);
+    if (g_set.addPos >= 0) {
+        int pg = g_set.addPos / (oc * orr), cell = g_set.addPos % (oc * orr), r = cell / oc, c = cell % oc;
+        g_set.addPos = (r < nr && c < nc) ? pg * nc * nr + r * nc + c : -1;
+    }
 }
 
 /* 기본 홈: M480 앱을 찾아서 + 파일 탐색기·설정 */
@@ -588,8 +604,8 @@ static void save_settings(void)
     for (i = -1; i < g_favN; i++) {
         if (i < 0)
             _snwprintf(line, sizeof(line) / sizeof(wchar_t),
-                       L"today=%d\r\ngrid=%d\r\nclock24=%d\r\nwall=%d\r\nwalldim=%d\r\nwallpath=%s\r\nfavinit=2\r\n",
-                       g_set.replaceToday, g_set.grid, g_set.clock24, g_set.wallType, g_set.wallDim, g_set.wallPath);
+                       L"today=%d\r\ngrid=%d\r\nclock24=%d\r\nwall=%d\r\nwalldim=%d\r\nwallpath=%s\r\naddpos=%d\r\nfavinit=2\r\n",
+                       g_set.replaceToday, g_set.grid, g_set.clock24, g_set.wallType, g_set.wallDim, g_set.wallPath, g_set.addPos);
         else
             _snwprintf(line, sizeof(line) / sizeof(wchar_t), L"fav=%d\t%s\t%s\t%s\r\n", g_fav[i].pos, g_fav[i].path, g_fav[i].key, g_fav[i].name);
         n = WideCharToMultiByte(CP_UTF8, 0, line, -1, u8, sizeof(u8), NULL, NULL);
@@ -626,6 +642,7 @@ static int load_settings(void)
         if (!wcsncmp(line, L"today=", 6)) g_set.replaceToday = (int)wcstol(line + 6, NULL, 10);
         else if (!wcsncmp(line, L"grid=", 5)) g_set.grid = (int)wcstol(line + 5, NULL, 10) % 3;
         else if (!wcsncmp(line, L"clock24=", 8)) g_set.clock24 = (int)wcstol(line + 8, NULL, 10);
+        else if (!wcsncmp(line, L"addpos=", 7)) g_set.addPos = (int)wcstol(line + 7, NULL, 10);
         else if (!wcsncmp(line, L"wall=", 5)) g_set.wallType = (int)wcstol(line + 5, NULL, 10);
         else if (!wcsncmp(line, L"walldim=", 8)) g_set.wallDim = (int)wcstol(line + 8, NULL, 10) % 3;
         else if (!wcsncmp(line, L"wallpath=", 9)) { wcsncpy(g_set.wallPath, line + 9, MAX_PATH - 1); g_set.wallPath[MAX_PATH - 1] = 0; }
@@ -1197,7 +1214,7 @@ static void grid_dims(int *cols, int *rows)
 }
 static int home_pages(void)
 {
-    int per = per_page(), mx = first_free(0), i, n;
+    int per = per_page(), mx = add_pos(), i, n;
     for (i = 0; i < g_favN; i++) if (g_fav[i].pos > mx) mx = g_fav[i].pos;
     n = mx / per + 1;
     if (g_dragging && g_page >= n - 1) n = g_page + 2;   /* 끌고 있을 때는 빈 페이지 하나 더 */
@@ -1337,7 +1354,7 @@ static void paint_home(void)
     if (badge > gw - S(24)) badge = gw - S(24);
     if (badge > S(58)) badge = S(58);
     if (badge < S(24)) badge = S(24);
-    freeSlot = first_free(0);
+    freeSlot = add_pos();
     g_shadow = g_wall != NULL;
     for (pg = g_page - 1; pg <= g_page + 1; pg++) {
         int ox;
@@ -1359,13 +1376,15 @@ static void paint_home(void)
                 tile_label(x + S(2), by + badge + S(1), gw - S(4), g_fav[idx].name, C_TEXT);
                 if (pg == g_page) hit_add(x, y, gw, gh, H_TILE, idx);
             } else if (idx < 0) {
-                if (pressed(H_EMPTY, pos)) rrect(x + S(2), y + S(2), gw - S(4), gh - S(4), S(10), C_PRESS);
-                if (pos == freeSlot && !g_dragging) {
-                    frame(bx, by, badge, badge, badge / 4, S(2), C_DIM);
-                    glyph_plus(bx + badge / 2, by + badge / 2, badge / 5, C_SUB);
-                    tile_label(x + S(2), by + badge + S(1), gw - S(4), L"앱 추가", C_SUB);
+                int isAdd = pos == freeSlot && !(g_dragging && g_lift == LIFT_ADD);
+                if (pressed(H_EMPTY, pos) || pressed(H_ADDTILE, pos) || (isAdd && g_lift == LIFT_ADD))
+                    rrect(x + S(2), y + S(2), gw - S(4), gh - S(4), S(10), C_PRESS);
+                if (isAdd) {
+                    frame(bx, by, badge, badge, badge / 4, S(2), g_wall ? C_SUB : C_DIM);
+                    glyph_plus(bx + badge / 2, by + badge / 2, badge / 5, g_wall ? C_TEXT : C_SUB);
+                    tile_label(x + S(2), by + badge + S(1), gw - S(4), L"앱 추가", g_wall ? C_TEXT : C_SUB);
                 }
-                if (pg == g_page) hit_add(x, y, gw, gh, H_EMPTY, pos);
+                if (pg == g_page) hit_add(x, y, gw, gh, isAdd ? H_ADDTILE : H_EMPTY, pos);
             }
         }
     }
@@ -1378,6 +1397,14 @@ static void paint_home(void)
         }
     }
     /* 끌고 있는 아이콘은 손가락 위에 */
+    if (g_dragging && g_lift == LIFT_ADD) {
+        int b2 = badge + S(8), bx = g_dx - b2 / 2, by = g_dy - b2 / 2 - S(14);
+        rrect(bx, by, b2, b2, b2 / 4, RGB(40, 40, 46));
+        frame(bx, by, b2, b2, b2 / 4, S(2), C_SUB);
+        glyph_plus(bx + b2 / 2, by + b2 / 2, b2 / 5, C_TEXT);
+        tile_label(bx - S(20), by + b2 + S(1), b2 + S(40), L"앱 추가", C_TEXT);
+        if (g_dx < S(18) || g_dx > W - S(18)) fill(g_dx < S(18) ? 0 : W - S(4), top, S(4), bottom - top, C_ACCENT);
+    }
     if (g_dragging && g_lift >= 0 && g_lift < g_favN) {
         int b2 = badge + S(8), bx = g_dx - b2 / 2, by = g_dy - b2 / 2 - S(14);
         draw_app_badge(&g_fav[g_lift], bx, by, b2);
@@ -1977,6 +2004,15 @@ static void long_press(int id, int arg)
         redraw();
         return;
     }
+    if (id == H_ADDTILE) {
+        g_lift = LIFT_ADD;
+        g_dragging = 0;
+        g_liftX = g_dx = t_lx; g_liftY = g_dy = t_ly;
+        g_hover = -1;
+        MessageBeep(MB_OK);
+        redraw();
+        return;
+    }
     if (id == H_TILE && arg < g_favN) {
         /* 들어 올림: 이대로 끌면 옮기기, 그냥 떼면 메뉴 */
         g_lift = arg;
@@ -2048,7 +2084,7 @@ static void option_do(int i)
     case O_WALL: go(SCR_WALL); return;
     case O_CLOCK: g_set.clock24 = !g_set.clock24; save_settings(); break;
     case O_RESET:
-        scan_all(); fav_defaults(); save_settings(); g_page = 0;
+        scan_all(); fav_defaults(); g_set.addPos = -1; save_settings(); g_page = 0;
         toast(L"홈을 처음 상태로 되돌렸어요");
         break;
     case O_RESCAN: {
@@ -2069,6 +2105,7 @@ static void activate(int id, int arg)
 {
     switch (id) {
     case H_TILE: if (arg < g_favN) launch(&g_fav[arg]); break;
+    case H_ADDTILE:
     case H_EMPTY: g_addFrom = arg; scan_all(); g_scroll[SCR_ALL] = 0; g_scr = SCR_ALL; g_addMode = 1; g_focus = -1; redraw(); break;
     case H_NAV_ALL: go(g_scr == SCR_ALL ? SCR_HOME : SCR_ALL); break;
     case H_NAV_RUN: go(g_scr == SCR_RUN ? SCR_HOME : SCR_RUN); break;
@@ -2140,7 +2177,7 @@ static void on_down(int x, int y)
     SetCapture(g_hwnd);
     if (t_hit >= 0) {
         int id = g_hit[t_hit].id;
-        if (id == H_TILE || id == H_ROW || id == H_QWIFI || id == H_QBT) SetTimer(g_hwnd, 3, 550, NULL);
+        if (id == H_TILE || id == H_ROW || id == H_QWIFI || id == H_QBT || id == H_ADDTILE) SetTimer(g_hwnd, 3, 550, NULL);
     }
     redraw();
 }
@@ -2160,6 +2197,15 @@ static int pos_from_xy(int x, int y)
 static void fav_drop(void)
 {
     int to = pos_from_xy(g_dx, g_dy), o, from;
+    if (g_lift == LIFT_ADD) {
+        if (to < 0) return;
+        from = add_pos();
+        o = fav_at(to);
+        if (o >= 0) g_fav[o].pos = from;   /* 그 자리 앱은 '앱 추가'가 있던 자리로 */
+        g_set.addPos = to;
+        save_settings();
+        return;
+    }
     if (to < 0 || g_lift < 0 || g_lift >= g_favN) return;
     from = g_fav[g_lift].pos;
     if (to == from) return;
@@ -2217,6 +2263,12 @@ static void on_up(int x, int y)
     t_down = 0;
     if (g_lift >= 0) {
         int li = g_lift;
+        if (li == LIFT_ADD && !g_dragging) {
+            g_lift = -1;
+            t_hit = -1;
+            activate(H_ADDTILE, add_pos());
+            return;
+        }
         if (g_dragging) {
             fav_drop();
             g_lift = -1; g_dragging = 0; g_hover = -1;
