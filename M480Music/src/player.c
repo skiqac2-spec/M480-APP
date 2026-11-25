@@ -117,15 +117,22 @@ static void power_init(void)
     pReleasePowerRequirement = (PFN_RPR)GetProcAddressW(h, L"ReleasePowerRequirement");
 }
 
+static int g_powerBt;   /* 오디오 스레드가 설정: 블루투스 출력 중 */
 static void power_keep(int on)
 {
+    /* 블루투스 중에는 내장 오디오칩(wav1:)을 강제로 켜 두지 않음.
+     * 켜 두면 블루투스로 가는 소리에 삐-/지직 잡음이 섞이는 기기가 있음 */
+    if (on && g_powerBt && g_powerReq) {
+        if (pReleasePowerRequirement) pReleasePowerRequirement(g_powerReq);
+        g_powerReq = NULL;
+    }
+    if (on && !g_powerBt && !g_powerReq && pSetPowerRequirement)
+        g_powerReq = pSetPowerRequirement((PVOID)L"wav1:", 0 /* D0 */, 0x00000001 | 0x00001000 /* POWER_NAME|POWER_FORCE */, NULL, 0);
     if (on && !g_unattended) {
         if (pPowerPolicyNotify) pPowerPolicyNotify(0x0003 /* PPN_UNATTENDEDMODE */, TRUE);
-        if (pSetPowerRequirement && !g_powerReq)
-            g_powerReq = pSetPowerRequirement((PVOID)L"wav1:", 0 /* D0 */, 0x00000001 | 0x00001000 /* POWER_NAME|POWER_FORCE */, NULL, 0);
         g_unattended = 1;
-    } else if (!on && g_unattended) {
-        if (pPowerPolicyNotify) pPowerPolicyNotify(0x0003, FALSE);
+    } else if (!on && (g_unattended || g_powerReq)) {
+        if (pPowerPolicyNotify && g_unattended) pPowerPolicyNotify(0x0003, FALSE);
         if (pReleasePowerRequirement && g_powerReq) pReleasePowerRequirement(g_powerReq);
         g_powerReq = NULL;
         g_unattended = 0;
@@ -253,9 +260,19 @@ static int bt_detect(UINT n)
 
 static int bt_active(void)
 {
-    if (g_set.btMode == 1) return 1;
     if (g_set.btMode == 2) return 0;
+    if (g_set.btMode != 0) return 1;
     return A.btDetected;
+}
+
+static int bt_rate(void)
+{
+    switch (g_set.btMode) {
+    case 3: return 48000;
+    case 4: return 32000;
+    case 5: return 22050;
+    default: return 44100;
+    }
 }
 
 static void choose_format(int lvl, int *rate, int *ch)
@@ -264,7 +281,7 @@ static void choose_format(int lvl, int *rate, int *ch)
     if (bt_active()) {
         /* 블루투스(SBC)는 44.1kHz 스테레오가 가장 확실함.
          * 22k/모노/11k를 받으면 무음이 되는 드라이버가 있음 */
-        *rate = 44100; *ch = 2;
+        *rate = bt_rate(); *ch = 2;
         return;
     }
     if (A.src.rate < r) {
@@ -381,7 +398,7 @@ static void publish(void)
 
 static int open_any(int rate, int ch)
 {
-    return out_open(rate, ch) || out_open(44100, 2) || out_open(22050, 2) || out_open(11025, 1);
+    return out_open(rate, ch) || out_open(44100, 2) || out_open(48000, 2) || out_open(22050, 2) || out_open(11025, 1);
 }
 
 /* 형식 변경(음질 변경/자동 하향/장치 변경) - 현재 위치 유지
@@ -593,6 +610,10 @@ static DWORD WINAPI audio_thread(LPVOID unused)
         {
             int want = bt_active() ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_ABOVE_NORMAL;
             if (want != A.prio) { SetThreadPriority(GetCurrentThread(), want); A.prio = want; }
+            if (g_powerBt != bt_active()) {
+                g_powerBt = bt_active();
+                if (A.playing && !A.paused) power_keep(1);   /* 전원 요구 다시 정리 */
+            }
         }
         if (A.playing && !A.paused && A.hwo) service();
         publish();
@@ -767,7 +788,7 @@ static void load_settings(void)
         if (g_set.order < 0 || g_set.order > 2) g_set.order = 0;
         if (g_set.autoLevel < 0 || g_set.autoLevel > 3) g_set.autoLevel = 1;
         g_set.compact = g_set.compact ? 1 : 0;
-        if (g_set.btMode < 0 || g_set.btMode > 2) g_set.btMode = 0;
+        if (g_set.btMode < 0 || g_set.btMode > 5) g_set.btMode = 0;
         g_set.panel = g_set.panel ? 1 : 0;
     }
 }
@@ -1621,9 +1642,14 @@ static void set_row_text(int i, const Status *st, const wchar_t **label, wchar_t
     case 2: *label = L"소리 크기"; wcscpy(val, g_levelPctName[g_set.levelIdx & 3]); break;
     case 3: *label = L"재생 순서"; wcscpy(val, g_orderName[g_set.order % 3]); break;
     case 4: *label = L"블루투스";
-        if (g_set.btMode == 1) wcscpy(val, L"항상 켬");
-        else if (g_set.btMode == 2) wcscpy(val, L"끔");
-        else wcscpy(val, st->btDetected ? L"자동 (연결됨)" : L"자동");
+        switch (g_set.btMode) {
+        case 1: wcscpy(val, L"켬 · 44.1k"); break;
+        case 2: wcscpy(val, L"끔"); break;
+        case 3: wcscpy(val, L"켬 · 48k"); break;
+        case 4: wcscpy(val, L"켬 · 32k"); break;
+        case 5: wcscpy(val, L"켬 · 22k"); break;
+        default: wcscpy(val, st->btDetected ? L"자동 (연결됨)" : L"자동"); break;
+        }
         break;
     case 5: *label = L"음악 목록 새로고침"; wsprintfW(val, L"%d곡", g_fileCount); break;
     case 6: *label = L"출력"; *kind = 1;
@@ -1851,7 +1877,7 @@ static void set_action(int row)
     case 1: g_set.earphone = !g_set.earphone; post_cmd(CMD_RECONFIG, -1, 0); break;
     case 2: g_set.levelIdx = (g_set.levelIdx + 1) & 3; post_cmd(CMD_RECONFIG, -1, 0); break;
     case 3: g_set.order = (g_set.order + 1) % 3; break;
-    case 4: g_set.btMode = (g_set.btMode + 1) % 3; post_cmd(CMD_RECONFIG, -2, 0); break;
+    case 4: g_set.btMode = (g_set.btMode + 1) % 6; post_cmd(CMD_RECONFIG, -2, 0); break;
     case 5: g_scr = SCR_LIB; do_rescan(); break;
     case 7: DestroyWindow(g_hwnd); return;
     }
