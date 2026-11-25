@@ -148,13 +148,13 @@ static void text(int x, int y, int w, int h, const wch *s, uint16_t c, int flags
 static void present_all(void) { plat_present(0, 0, SCR_W, SCR_H); }
 
 /* ---- list widget ---------------------------------------------------------- */
-struct item { wch label[100]; wch value[28]; unsigned char ic, dim; };
+struct item { wch label[200]; wch value[28]; unsigned char ic, dim, two; };   /* two: long names over two lines */
 
 static void item_set(struct item *it, int ic, const wch *label, const wch *value)
 {
     memset(it, 0, sizeof(*it));
     it->ic = (unsigned char)ic;
-    wcpy(it->label, label, 100);
+    wcpy(it->label, label, 200);
     if (value) wcpy(it->value, value, 28);
 }
 
@@ -178,6 +178,41 @@ static void draw_foot(const wch *left, const wch *right, int pressed)
         text(124, SCR_H - FOOT_H, SCR_W - 132, FOOT_H, right, C_DIM, TF_RIGHT | TF_SMALL);
 }
 
+/* A file name in a list row: one line if it fits, otherwise two lines in the small font.
+ * When even two lines are not enough the middle is dropped and the END is kept, because
+ * names of a series ("Super Robot Taisen ...") differ at the end. */
+static void draw_name2(int x, int y, int w, const wch *name, uint16_t c)
+{
+    wch l1[200], l2[200];
+    int n = wlen(name), cut, i, sp;
+
+    if (plat_text_width(name, n, 0) <= w) { text(x, y, w, ROW_H - 1, name, c, TF_LEFT); return; }
+    if (plat_text_width(name, n, TF_SMALL) <= w) { text(x, y, w, ROW_H - 1, name, c, TF_LEFT | TF_SMALL); return; }
+    /* first line: as many characters as fit, broken after a space if there is one nearby */
+    cut = n;
+    while (cut > 1 && plat_text_width(name, cut, TF_SMALL) > w) cut--;
+    for (sp = cut; sp > cut / 2 && name[sp - 1] != ' '; sp--) ;
+    if (sp > cut / 2 && cut < n) cut = sp;
+    for (i = 0; i < cut && i < 199; i++) l1[i] = name[i];
+    l1[i] = 0;
+    while (name[cut] == ' ') cut++;
+    /* second line: the rest, or "..." + the end of the name */
+    if (plat_text_width(name + cut, -1, TF_SMALL) <= w) wcpy(l2, name + cut, 200);
+    else {
+        int k = n;
+        while (k > cut && plat_text_width(name + k - 1, n - k + 1, TF_SMALL) + plat_text_width(u"…", 1, TF_SMALL) <= w) k--;
+        if (k > 0 && name[k - 1] != ' ') {           /* start at a whole word when one is close */
+            int j = k;
+            while (j < n && name[j] != ' ') j++;
+            if (j < n && j - k <= 8) k = j;
+        }
+        while (name[k] == ' ' && k < n) k++;
+        l2[0] = u'…'; wcpy(l2 + 1, name + k, 199);
+    }
+    text(x, y + 2, w, 18, l1, c, TF_LEFT | TF_SMALL);
+    text(x, y + 19, w, 18, l2, c, TF_LEFT | TF_SMALL);
+}
+
 static void draw_list(const wch *title, struct item *it, int n, int sel, int scroll,
                       const wch *back, const wch *hint, int foot_pressed)
 {
@@ -189,7 +224,10 @@ static void draw_list(const wch *title, struct item *it, int n, int sel, int scr
         if (y + ROW_H <= LIST_Y || y >= LIST_Y + LIST_H) continue;
         fill(0, y, SCR_W, ROW_H - 1, i == sel ? C_SEL : ((i & 1) ? C_ROW2 : C_ROW));
         if (it[i].ic) { icon(it[i].ic, 10, y + 10); tx = 40; }
-        if (it[i].value[0]) {
+        if (it[i].two) {
+            draw_name2(tx, y, SCR_W - tx - (it[i].value[0] ? 84 : 12), it[i].label, it[i].dim ? C_DIM : C_TEXT);
+            if (it[i].value[0]) text(SCR_W - 84, y, 76, ROW_H - 1, it[i].value, i == sel ? C_TEXT : C_ACC, TF_RIGHT | TF_SMALL);
+        } else if (it[i].value[0]) {
             text(tx, y, SCR_W - tx - 118, ROW_H - 1, it[i].label, it[i].dim ? C_DIM : C_TEXT, TF_LEFT);
             text(SCR_W - 116, y, 106, ROW_H - 1, it[i].value, i == sel ? C_TEXT : C_ACC, TF_RIGHT);
         } else
@@ -658,8 +696,15 @@ static int browse(char *out, const wch *title)
             }
             memset(&it[cnt], 0, sizeof(it[cnt]));
             it[cnt].ic = ents[i].is_dir ? (ents[i].is_card ? IC_CARD : IC_FOLDER) : IC_DISC;
-            plat_path_to_wch(ents[i].name, it[cnt].label, 100);
-            if (!ents[i].is_dir) wcpy(it[cnt].value, si >= 0 ? sysreg_tag(si) : u"ZIP", 28);
+            plat_path_to_wch(ents[i].name, it[cnt].label, 200);
+            if (!ents[i].is_dir) {
+                int k = wlen(it[cnt].label);
+                while (k > 0 && it[cnt].label[k - 1] != '.') k--;
+                if (k > 1) it[cnt].label[k - 1] = 0;          /* the system tag replaces the extension */
+                wcpy(it[cnt].value, si >= 0 ? sysreg_tag(si) : u"ZIP", 28);
+                it[cnt].two = 1;
+            } else
+                it[cnt].two = 1;
             map[cnt++] = i;
         }
         if (cnt == (up ? 1 : 0)) {

@@ -657,7 +657,9 @@ API = {
  'BeginPaint': lambda h, ps, *_: 0x2001, 'EndPaint': lambda *_: 1, 'GetStockObject': lambda *_: 0x4001, 'DeleteObject': lambda *_: 1,
  'CreateDIBSection': api_CreateDIBSection, 'SelectObject': api_SelectObject, 'BitBlt': api_BitBlt, 'StretchBlt': lambda *_: 1,
  'SetBkMode': lambda *_: 1, 'SetTextColor': lambda dc, c, *_: dc_state.setdefault(dc, {}).__setitem__('color', c) or 0,
- 'DrawTextW': api_DrawTextW, 'CreateFontIndirectW': api_CreateFontIndirectW,
+ 'DrawTextW': api_DrawTextW,
+ 'GetTextExtentExPointW': lambda dc, st, n, mx: (lambda w: (wr(sarg(2), struct.pack('<ii', int(w), 17)), 1)[1])(get_font(dc_state.get(dc, {}).get('font')).getlength(wstr(st, s32(n)))),
+ 'GetTextExtentPoint32W': lambda dc, st, n, psz: (lambda w: (wr(psz, struct.pack('<ii', int(w), 17)), 1)[1])(get_font(dc_state.get(dc, {}).get('font')).getlength(wstr(st, s32(n)))), 'CreateFontIndirectW': api_CreateFontIndirectW,
  'SHFullScreen': lambda *_: 1, 'ImmAssociateContext': lambda *_: 0, 'ImmGetVirtualKey': lambda *_: 0, 'SystemIdleTimerReset': lambda *_: 0,
  # --- audio ---
  'waveOutOpen': api_waveOutOpen, 'waveOutClose': lambda *_: 0, 'waveOutPrepareHeader': lambda *_: 0,

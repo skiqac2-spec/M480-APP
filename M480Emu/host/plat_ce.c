@@ -308,6 +308,16 @@ void plat_text(int x, int y, int w, int h, const wch *s, uint16_t color, int fla
     DrawTextW(dc_mem, (const WCHAR *)s, -1, &rc, fmt);
 }
 
+int plat_text_width(const wch *s, int n, int flags)
+{
+    SIZE sz;
+    if (n < 0) { n = 0; while (s[n]) n++; }
+    if (n == 0) return 0;
+    SelectObject(dc_mem, fonts[(flags & TF_BIG) ? 0 : (flags & TF_SMALL) ? 2 : 1]);
+    if (!GetTextExtentPoint32W(dc_mem, (const WCHAR *)s, n, &sz)) return n * 8;
+    return sz.cx;
+}
+
 /* ---- audio: waveOut, polled (no threads) ------------------------------------ */
 #define NBUF        12
 #define BUF_FRAMES  1024

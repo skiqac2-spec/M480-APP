@@ -52,6 +52,7 @@ int      plat_init(void);
 void     plat_exit(void);
 void     plat_present(int x, int y, int w, int h);
 void     plat_text(int x, int y, int w, int h, const wch *s, uint16_t color, int flags);
+int      plat_text_width(const wch *s, int n, int flags);   /* pixel width of the first n chars (n < 0: all) */
 int      plat_poll(struct event *ev);                /* 0 = no event pending */
 void     plat_wait_event(int timeout_ms);            /* sleep until an event or timeout */
 unsigned plat_ticks(void);                           /* milliseconds */
