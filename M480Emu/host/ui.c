@@ -323,12 +323,18 @@ static void ui_busy(const wch *msg)
 }
 
 /* returns 1 if the first (primary) button was chosen */
+/* Message / question box.  Made hard to hit by accident:
+ *  - touches during the first 0.4 s are ignored (the tap that opened it cannot answer it)
+ *  - a button only counts if the finger is lifted on that same button
+ *  - with two buttons the second one (cancel) is pre-selected for the keys */
 static int ui_msg(const wch *title, const wch *body, const wch *b1, const wch *b2)
 {
     struct event ev;
-    int dirty = 1, sel = 0, res = -1, down = -1;
+    int dirty = 1, sel = b2 ? 1 : 0, res = -1, down = -1;
     const int by = 236, bh = 48;
+    unsigned t0 = plat_ticks();
 
+    while (plat_poll(&ev)) if (ev.type == EV_QUIT) want_quit = 1;   /* drop input already queued */
     while (res < 0 && !want_quit) {
         if (dirty) {
             int w1 = b2 ? 142 : 296;
@@ -354,13 +360,22 @@ static int ui_msg(const wch *title, const wch *body, const wch *b1, const wch *b
             break;
         case EV_TDOWN:
             down = -1;
+            if (plat_ticks() - t0 < 400) break;
             if (ev.y >= by - 6 && ev.y < by + bh + 10) {
                 down = (b2 && ev.x >= 160) ? 1 : 0;
                 sel = down; dirty = 1;
             }
             break;
+        case EV_TMOVE:
+            if (down >= 0) {
+                int on = ev.y >= by - 16 && ev.y < by + bh + 20 && (b2 ? ((ev.x >= 160) == (down == 1)) : 1);
+                if (!on) { down = -1; dirty = 1; }       /* slid off: cancelled */
+            }
+            break;
         case EV_TUP:
-            if (down >= 0) res = (down == 0);
+            if (down >= 0 && ev.y >= by - 16 && ev.y < by + bh + 20 && (b2 ? ((ev.x >= 160) == (down == 1)) : 1))
+                res = (down == 0);
+            down = -1;
             break;
         }
     }
@@ -863,11 +878,21 @@ static int pause_menu(char *newgame)
         r = ui_list(u"잠시 멈춤", it, n, &sel, u"계속", NULL);
         if (r < 0 || r == 0) break;
         if (r == 1) {
+            wch q[160];
+            slot_label(q, 160, u"칸");
+            wcat(q, core_state_exists(cfg.slot)
+                     ? u"에 지금 상태를 저장할까요?\n\n이 칸에 이미 저장된 내용은 지워지고 새로 저장됩니다."
+                     : u"에 지금 상태를 저장할까요?", 160);
+            if (!ui_msg(u"저장 확인", q, u"저장", u"취소")) continue;
             ui_busy(u"저장하는 중...");
             if (core_state_save(cfg.slot) == 0) { slot_label(bar_msg, 64, u"저장했습니다 - 칸"); bar_msg_until = plat_ticks() + 2500; break; }
             ui_msg(u"저장 실패", u"상태를 저장하지 못했습니다.\n저장 공간이 부족한지 확인해 주세요.", u"확인", NULL);
         } else if (r == 2) {
+            wch q[160];
             if (!core_state_exists(cfg.slot)) continue;
+            slot_label(q, 160, u"칸");
+            wcat(q, u"에 저장한 곳으로 돌아갈까요?\n\n저장하지 않은 지금 진행은 사라집니다.", 160);
+            if (!ui_msg(u"불러오기 확인", q, u"불러오기", u"취소")) continue;
             ui_busy(u"불러오는 중...");
             if (core_state_load(cfg.slot) == 0) { slot_label(bar_msg, 64, u"불러왔습니다 - 칸"); bar_msg_until = plat_ticks() + 2500; break; }
             ui_msg(u"불러오기 실패", u"저장된 상태를 읽지 못했습니다.", u"확인", NULL);
