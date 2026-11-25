@@ -983,13 +983,13 @@ static void wave_info(void)
     g_nIn = waveInGetNumDevs();
     logw(L"출력 장치 %u개, 입력 장치 %u개", g_nOut, g_nIn);
     for (i = 0; i < g_nOut && i < 8; i++) {
-        WAVEOUTCAPSW c; memset(&c, 0, sizeof(c));
-        if (waveOutGetDevCapsW(i, &c, sizeof(c)) == 0)
+        WAVEOUTCAPS c; memset(&c, 0, sizeof(c));
+        if (waveOutGetDevCaps(i, &c, sizeof(c)) == 0)
             logw(L"  출력 %u: %s%s", i, c.szPname, name_bt(c.szPname) ? L" (블루투스?)" : L"");
     }
     for (i = 0; i < g_nIn && i < 8; i++) {
-        WAVEINCAPSW c; memset(&c, 0, sizeof(c));
-        if (waveInGetDevCapsW(i, &c, sizeof(c)) == 0)
+        WAVEINCAPS c; memset(&c, 0, sizeof(c));
+        if (waveInGetDevCaps(i, &c, sizeof(c)) == 0)
             logw(L"  입력 %u: %s%s", i, c.szPname, name_bt(c.szPname) ? L" (블루투스?)" : L"");
     }
 }
