@@ -550,6 +550,7 @@ static void menu_help(void)
 }
 
 /* ---- settings ------------------------------------------------------------------- */
+enum { ST_AHQ = 100, ST_VOL };
 enum { ST_SPEED, ST_FSKIP, ST_SOUND, ST_CDDA, ST_STRETCH, ST_FPS, ST_TOUCH, ST_TALPHA, ST_TSIZE, ST_KEYS, ST_REGION, ST_BIOS, ST_RESET };
 
 static void menu_settings(void)
@@ -557,8 +558,8 @@ static void menu_settings(void)
     static const wch *const fs[] = { u"끔", u"자동", u"1", u"2", u"3" };
     static const wch *const spd[] = { u"화질 우선", u"균형", u"빠름", u"최고속" };
     static const wch *const reg[] = { u"자동", u"NTSC", u"PAL" };
-    struct item it[16];
-    int id[16];
+    struct item it[20];
+    int id[20];
     int sel = 0, r, n, ps1 = (sys.flags & SF_PS1OPTS) != 0;
     wch title[48];
 
@@ -568,6 +569,11 @@ static void menu_settings(void)
         if (ps1) { item_set(&it[n], IC_NONE, u"성능 모드", spd[cfg.speed]); id[n++] = ST_SPEED; }
         if (sys.flags & SF_FRAMESKIP) { item_set(&it[n], IC_NONE, u"화면 건너뛰기", fs[cfg.frameskip]); id[n++] = ST_FSKIP; }
         item_set(&it[n], IC_NONE, u"소리", cfg.sound ? u"켬" : u"끔"); id[n++] = ST_SOUND;
+        if (cfg.sound) {
+            static const wch *const vol[] = { u"보통", u"작게", u"크게" };
+            item_set(&it[n], IC_NONE, u"  소리 음질", cfg.audio_hq ? u"높음 (블루투스)" : u"보통 (권장)"); id[n++] = ST_AHQ;
+            item_set(&it[n], IC_NONE, u"  소리 크기", vol[cfg.volume]); id[n++] = ST_VOL;
+        }
         if (ps1) { item_set(&it[n], IC_NONE, u"CD 음악/음성", cfg.cdda ? u"켬" : u"끔"); id[n++] = ST_CDDA; }
         item_set(&it[n], IC_NONE, u"화면 크게 채우기", cfg.stretch ? u"켬" : u"끔"); id[n++] = ST_STRETCH;
         item_set(&it[n], IC_NONE, u"속도(FPS) 표시", cfg.show_fps ? u"켬" : u"끔"); id[n++] = ST_FPS;
@@ -590,6 +596,8 @@ static void menu_settings(void)
         case ST_SPEED: cfg.speed = (cfg.speed + 1) % 4; break;
         case ST_FSKIP: cfg.frameskip = (cfg.frameskip + 1) % 5; break;
         case ST_SOUND: cfg.sound ^= 1; break;
+        case ST_AHQ: cfg.audio_hq ^= 1; break;
+        case ST_VOL: cfg.volume = (cfg.volume + 1) % 3; break;
         case ST_CDDA: cfg.cdda ^= 1; break;
         case ST_STRETCH: cfg.stretch ^= 1; break;
         case ST_FPS: cfg.show_fps ^= 1; break;

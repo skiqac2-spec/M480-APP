@@ -1,5 +1,6 @@
 /* libretro host glue: connects the PCSX-ReARMed core to our tiny platform layer. */
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -269,56 +270,117 @@ void core_redraw(void)
     plat_present(0, 0, SCR_W, GAME_H);
 }
 
-/* audio: cores produce all kinds of rates (32000, 48000, 65536...); the phone gets 44100.
- * The resampler also keeps the sound continuous: when the emulation cannot quite keep up, or
- * runs slightly fast, the conversion ratio follows the amount of queued audio (a little lower
- * or higher pitch) instead of letting the queue run dry and crackle. */
-#define OUT_RATE 44100
+/* Audio path: core rate (32768, 44100, 48000 ...) -> phone.
+ * The M480's own amplifier distorts with loud 44.1 kHz sound (found with M480Music), so by
+ * default the output is 22050 Hz with headroom, a low cut and a limiter:
+ *   input low-pass (anti-alias) -> resample -> low cut (~80 Hz) -> level -> limiter
+ * The resampling ratio also follows the amount of queued audio by at most a few percent, so a
+ * small speed difference does not let the queue run dry (crackle) or grow (delay). */
 #define AUDIO_TARGET_MS 140
+static double rs_in_rate = 44100.0;
+static int rs_out_rate;
 static unsigned rs_base = 0x10000, rs_step = 0x10000, rs_pos;      /* 16.16 source position */
 static int rs_stretch = 1024;                                      /* 1024 = 1.0, larger = more output */
 static int16_t rs_last[2];
 static int16_t rs_buf[2048 * 2];
+static int lp_a, lp1[2], lp2[2];                                   /* anti-alias filter (Q15) */
+static int hp_r, hp_x[2], hp_y[2];                                 /* low cut (Q15) */
+static int lim_g = 32768;                                          /* limiter gain (Q15) */
 
 static void set_audio_rate(double rate)
 {
-    if (rate < 4000.0 || rate > 200000.0) rate = OUT_RATE;
-    rs_base = (unsigned)(rate * 65536.0 / OUT_RATE + 0.5);
+    if (rate < 4000.0 || rate > 200000.0) rate = 44100.0;
+    rs_in_rate = rate;
+    rs_out_rate = 0;                                               /* recomputed on next callback */
+}
+
+static void audio_setup(void)
+{
+    double out = plat_audio_rate(), fc;
+    rs_out_rate = (int)out;
+    rs_base = (unsigned)(rs_in_rate * 65536.0 / out + 0.5);
     rs_step = rs_base; rs_stretch = 1024;
     rs_pos = 0; rs_last[0] = rs_last[1] = 0;
+    /* two one-pole low-passes at ~40% of the output rate, only when going down in rate */
+    fc = out * 0.40;
+    if (rs_in_rate > out * 1.05) {
+        double x = 1.0 - exp(-2.0 * 3.14159265 * fc / rs_in_rate);
+        lp_a = (int)(x * 32768.0);
+    } else lp_a = 0;
+    lp1[0] = lp1[1] = lp2[0] = lp2[1] = 0;
+    hp_r = (int)((1.0 - 2.0 * 3.14159265 * 80.0 / out) * 32768.0);
+    hp_x[0] = hp_x[1] = hp_y[0] = hp_y[1] = 0;
+    lim_g = 32768;
+    plat_log("audio: core %.0f Hz -> %d Hz\n", rs_in_rate, rs_out_rate);
 }
 
 static void audio_adapt(void)
 {
     int fill = plat_audio_fill();                  /* queued milliseconds */
-    int want = 1024 + (AUDIO_TARGET_MS - fill) * 1000 / AUDIO_TARGET_MS;
-    if (want < 1000) want = 1000 - (1000 - want) / 8;                  /* gentle when the queue is long */
-    if (want < 980) want = 980;
-    if (want > 1800) want = 1800;
-    rs_stretch += (want - rs_stretch) / 8;                             /* smooth: no warble */
+    int want = 1024 + (AUDIO_TARGET_MS - fill) * 120 / AUDIO_TARGET_MS;
+    if (want < 1004) want = 1004;                  /* at most ~2% faster, */
+    if (want > 1090) want = 1090;                  /* ~6% slower: no audible wobble */
+    rs_stretch += (want - rs_stretch) / 16;
     rs_step = (unsigned)(((unsigned long long)rs_base << 10) / (unsigned)rs_stretch);
+}
+
+static inline int16_t post(int ch, int v)
+{
+    static const int levels[3] = { 22938, 14746, 32768 };       /* 70%, 45%, 100% */
+    int y, a;
+    /* low cut: y = x - x1 + r*y1 */
+    y = v - hp_x[ch] + (int)(((long long)hp_r * hp_y[ch]) >> 15);
+    hp_x[ch] = v; hp_y[ch] = y;
+    y = (int)(((long long)y * levels[cfg.volume]) >> 15);
+    /* limiter: duck instantly above ~90%, recover slowly */
+    a = (int)(((long long)y * lim_g) >> 15);
+    if (a > 29500 || a < -29500) {
+        int ay = y < 0 ? -y : y;
+        lim_g = (int)(29500LL * 32768 / (ay ? ay : 1));
+        a = (int)(((long long)y * lim_g) >> 15);
+    }
+    return (int16_t)(a > 32767 ? 32767 : a < -32768 ? -32768 : a);
 }
 
 static size_t audio_cb(const int16_t *data, size_t frames)
 {
-    size_t n = 0;
+    size_t n = 0, j;
+    static int16_t *flt; static size_t flt_n;
+    const int16_t *src = data;
     if (!cfg.sound || !frames) return frames;
+    if (rs_out_rate != plat_audio_rate()) audio_setup();
     audio_adapt();
-    /* linear interpolation between source frames; rs_pos is relative to data[-1] (= rs_last) */
+    if (lp_a) {                                    /* anti-alias low-pass at the input rate */
+        if (flt_n < frames) { free(flt); flt = malloc(frames * 4); flt_n = flt ? frames : 0; }
+        if (flt) {
+            for (j = 0; j < frames; j++) {
+                int c;
+                for (c = 0; c < 2; c++) {
+                    lp1[c] += ((data[j * 2 + c] - lp1[c]) * lp_a) >> 15;
+                    lp2[c] += ((lp1[c] - lp2[c]) * lp_a) >> 15;
+                    flt[j * 2 + c] = (int16_t)lp2[c];
+                }
+            }
+            src = flt;
+        }
+    }
+    /* linear interpolation between source frames; rs_pos is relative to src[-1] (= rs_last) */
     for (;;) {
         unsigned i = rs_pos >> 16, f = (rs_pos & 0xffff) >> 4;       /* 12-bit fraction */
         const int16_t *a, *b;
         if (i >= frames) break;
-        a = i ? data + (i - 1) * 2 : rs_last;
-        b = data + i * 2;
-        rs_buf[n * 2] = (int16_t)(a[0] + (((b[0] - a[0]) * (int)f) >> 12));
-        rs_buf[n * 2 + 1] = (int16_t)(a[1] + (((b[1] - a[1]) * (int)f) >> 12));
+        a = i ? src + (i - 1) * 2 : rs_last;
+        b = src + i * 2;
+        rs_buf[n * 2] = post(0, a[0] + (((b[0] - a[0]) * (int)f) >> 12));
+        rs_buf[n * 2 + 1] = post(1, a[1] + (((b[1] - a[1]) * (int)f) >> 12));
         rs_pos += rs_step;
         if (++n == 2048) { plat_audio_write(rs_buf, (int)n); n = 0; }
     }
     if (n) plat_audio_write(rs_buf, (int)n);
     rs_pos -= (unsigned)frames << 16;
-    rs_last[0] = data[(frames - 1) * 2]; rs_last[1] = data[(frames - 1) * 2 + 1];
+    rs_last[0] = src[(frames - 1) * 2]; rs_last[1] = src[(frames - 1) * 2 + 1];
+    /* limiter recovery: ~1 dB per callback */
+    if (lim_g < 32768) { lim_g += (32768 - lim_g) / 8 + 1; if (lim_g > 32768) lim_g = 32768; }
     return frames;
 }
 static int16_t one_buf[512 * 2]; static int one_n;

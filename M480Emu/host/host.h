@@ -75,7 +75,8 @@ int      plat_audio_open(int rate);                  /* stereo s16 */
 void     plat_audio_close(void);
 void     plat_audio_write(const int16_t *pcm, int frames);
 int      plat_audio_fill(void);                      /* queued audio in milliseconds */
-void     plat_audio_pump(void);                      /* hand finished buffers back to the device */
+void     plat_audio_pump(void);
+int      plat_audio_rate(void);                      /* output rate the device is (or will be) opened with */                      /* hand finished buffers back to the device */
 void     plat_audio_pause(int on);
 
 #define PSEP '\\'
@@ -139,6 +140,8 @@ struct settings {
     int touchpad;       /* on-screen D-pad and buttons over the game picture */
     int touch_alpha;    /* transparency step 0..4 = 0%, 25%, 50%, 75%, 100% (invisible but working) */
     int touch_size;     /* 0 normal, 1 large */
+    int audio_hq;       /* 0: 22050 Hz output (clean on the M480's own amplifier), 1: 44100 Hz (Bluetooth) */
+    int volume;         /* 0 normal (70%), 1 quiet (45%), 2 loud (100%) */
     int keys[BIND_COUNT][2];
     char last_dir[HPATH];
     char last_game[HPATH];

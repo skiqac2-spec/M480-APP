@@ -320,8 +320,10 @@ int plat_text_width(const wch *s, int n, int flags)
 
 /* ---- audio: waveOut, polled (no threads) ------------------------------------ */
 #define NBUF        12
-#define BUF_FRAMES  1024
+#define BUF_MAX     1024
+#define BUF_FRAMES  buf_frames                 /* ~23 ms per buffer at either rate */
 #define RING_FRAMES 16384                      /* power of two */
+static int cur_rate = 22050, buf_frames = 512;
 static HWAVEOUT h_wo;
 static WAVEHDR whdr[NBUF];
 static int16_t *wbuf[NBUF];
@@ -334,6 +336,8 @@ int plat_audio_open(int rate)
     WAVEFORMATEX wf;
     int i;
     if (h_wo) return 0;
+    cur_rate = rate;
+    buf_frames = rate >= 44100 ? 1024 : 512;
     memset(&wf, 0, sizeof(wf));
     wf.wFormatTag = WAVE_FORMAT_PCM;
     wf.nChannels = 2;
@@ -348,7 +352,7 @@ int plat_audio_open(int rate)
     }
     if (!ring) ring = calloc(RING_FRAMES, 4);
     for (i = 0; i < NBUF; i++) {
-        if (!wbuf[i]) wbuf[i] = calloc(BUF_FRAMES, 4);
+        if (!wbuf[i]) wbuf[i] = calloc(BUF_MAX, 4);
         memset(&whdr[i], 0, sizeof(whdr[i]));
         whdr[i].lpData = (LPSTR)wbuf[i];
         whdr[i].dwBufferLength = BUF_FRAMES * 4;
@@ -402,7 +406,13 @@ void plat_audio_pump(void)
 void plat_audio_write(const int16_t *pcm, int frames)
 {
     unsigned pos, k;
-    if (!h_wo) { if (plat_audio_open(44100) != 0) return; }
+    if (h_wo && cur_rate != plat_audio_rate()) plat_audio_close();   /* setting changed */
+    if (!h_wo) {
+        if (plat_audio_open(plat_audio_rate()) != 0) {
+            if (plat_audio_open(44100) != 0) return;               /* device refused 22 kHz */
+            plat_log("22 kHz output refused, using 44.1 kHz\n");
+        }
+    }
     if (!ring || frames <= 0) return;
     if (frames > RING_FRAMES / 2) frames = RING_FRAMES / 2;
     if (ring_w - ring_r + (unsigned)frames > RING_FRAMES - BUF_FRAMES)
@@ -422,7 +432,12 @@ int plat_audio_fill(void)
     if (!h_wo || !ring) return 0;
     for (i = 0; i < NBUF; i++)
         if (queued[i] && !(whdr[i].dwFlags & WHDR_DONE)) nq++;
-    return (int)((ring_w - ring_r + (unsigned)nq * BUF_FRAMES) * 1000u / 44100u);
+    return (int)((ring_w - ring_r + (unsigned)nq * BUF_FRAMES) * 1000u / (unsigned)cur_rate);
+}
+
+int plat_audio_rate(void)
+{
+    return cfg.audio_hq ? 44100 : 22050;
 }
 
 void plat_audio_pause(int on)
