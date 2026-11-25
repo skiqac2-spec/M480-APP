@@ -492,7 +492,7 @@ static void menu_help(void)
         u"4. 화면 터치 버튼\n\n"
         u"게임 화면 왼쪽 아래 십자키, 오른쪽 아래 버튼을 손가락이나 펜으로 누르세요. "
         u"누른 채로 미끄러뜨리면 방향이 바뀝니다. 두 버튼 사이를 누르면 둘 다 눌립니다.\n\n"
-        u"[설정]에서 켜고 끄기, 투명도(0~100%), 크기(보통/크게)를 바꿀 수 있습니다. "
+        u"[설정]에서 켜고 끄기, 투명도(0~100%), 크기(5단계), 십자키 방식(대각선 8방향/십자 4방향)을 바꿀 수 있습니다. "
         u"100%는 보이지 않지만 누르면 동작합니다.",
 
         u"5. 저장하기\n\n"
@@ -550,7 +550,7 @@ static void menu_help(void)
 }
 
 /* ---- settings ------------------------------------------------------------------- */
-enum { ST_AHQ = 100, ST_VOL };
+enum { ST_AHQ = 100, ST_VOL, ST_DPAD };
 enum { ST_SPEED, ST_FSKIP, ST_SOUND, ST_CDDA, ST_STRETCH, ST_FPS, ST_TOUCH, ST_TALPHA, ST_TSIZE, ST_KEYS, ST_REGION, ST_BIOS, ST_RESET };
 
 static void menu_settings(void)
@@ -581,7 +581,9 @@ static void menu_settings(void)
         if (cfg.touchpad) {
             static const wch *const ta[] = { u"0% (진하게)", u"25%", u"50%", u"75%", u"100% (안 보임)" };
             item_set(&it[n], IC_NONE, u"  터치 버튼 투명도", ta[cfg.touch_alpha]); id[n++] = ST_TALPHA;
-            item_set(&it[n], IC_NONE, u"  터치 버튼 크기", cfg.touch_size ? u"크게" : u"보통"); id[n++] = ST_TSIZE;
+            static const wch *const tsz[] = { u"아주 작게", u"작게", u"보통", u"크게", u"아주 크게" };
+            item_set(&it[n], IC_NONE, u"  터치 버튼 크기", tsz[cfg.touch_size]); id[n++] = ST_TSIZE;
+            item_set(&it[n], IC_NONE, u"  십자키 방식", cfg.dpad_4way ? u"십자 (4방향)" : u"대각선 (8방향)"); id[n++] = ST_DPAD;
         }
         item_set(&it[n], IC_KEY, u"키 설정", NULL); id[n++] = ST_KEYS;
         if (ps1) { item_set(&it[n], IC_NONE, u"영상 방식 *", reg[cfg.region]); id[n++] = ST_REGION; }
@@ -603,7 +605,8 @@ static void menu_settings(void)
         case ST_FPS: cfg.show_fps ^= 1; break;
         case ST_TOUCH: cfg.touchpad ^= 1; break;
         case ST_TALPHA: cfg.touch_alpha = (cfg.touch_alpha + 1) % 5; break;
-        case ST_TSIZE: cfg.touch_size ^= 1; break;
+        case ST_TSIZE: cfg.touch_size = (cfg.touch_size + 1) % 5; break;
+        case ST_DPAD: cfg.dpad_4way ^= 1; break;
         case ST_KEYS: menu_keys(); break;
         case ST_REGION: cfg.region = (cfg.region + 1) % 3; break;
         case ST_BIOS: cfg.use_bios ^= 1; break;
@@ -940,9 +943,10 @@ static int ov_pixel_id(int x, int y)
 
 static void ov_layout(void)
 {
-    int big = cfg.touch_size, d, cx, cy, i;
-    ov_dr = big ? 58 : 47;
-    ov_fr = big ? 24 : 20;
+    static const unsigned char dr[5] = { 36, 41, 47, 56, 66 }, fr[5] = { 15, 17, 20, 24, 28 };
+    int d, cx, cy, i;
+    ov_dr = dr[cfg.touch_size];
+    ov_fr = fr[cfg.touch_size];
     ov_dx = ov_dr + 6;
     ov_dy = GAME_H - ov_dr - 6;
     ov_nface = 0;
@@ -989,6 +993,13 @@ static void ov_draw_sprite(void)
         fill(ov_dx + r - 12 - i, ov_dy - i, 1, i * 2 + 1, ring);
     }
     disc(ov_dx, ov_dy, w * 6 / 10, RGB565(56, 64, 78));
+    if (!cfg.dpad_4way) {                    /* 8 directions: small markers between the arms */
+        int k = r * 66 / 100, m = r * 9 / 100 + 1;
+        disc(ov_dx - k * 7 / 10, ov_dy - k * 7 / 10, m, ring);
+        disc(ov_dx + k * 7 / 10, ov_dy - k * 7 / 10, m, ring);
+        disc(ov_dx - k * 7 / 10, ov_dy + k * 7 / 10, m, ring);
+        disc(ov_dx + k * 7 / 10, ov_dy + k * 7 / 10, m, ring);
+    }
 
     /* face buttons */
     for (i = 0; i < 4; i++) {
@@ -1094,6 +1105,11 @@ static unsigned ov_hit(int x, int y)
     if (dx * dx + dy * dy <= (ov_dr * 15 / 10) * (ov_dr * 15 / 10) && x < SCR_W / 2) {
         int dead = ov_dr / 5;
         if (dx * dx + dy * dy < dead * dead) return 0;
+        if (cfg.dpad_4way) {                       /* plus only: the stronger direction wins */
+            if (abs(dx) >= abs(dy)) m = 1u << (dx < 0 ? PB_LEFT : PB_RIGHT);
+            else m = 1u << (dy < 0 ? PB_UP : PB_DOWN);
+            return m;
+        }
         /* 8 directions: a diagonal when both parts are large enough */
         if (abs(dx) * 10 > abs(dy) * 4) m |= 1u << (dx < 0 ? PB_LEFT : PB_RIGHT);
         if (abs(dy) * 10 > abs(dx) * 4) m |= 1u << (dy < 0 ? PB_UP : PB_DOWN);
@@ -1156,7 +1172,7 @@ static int run_game(char *newgame)
     struct event ev;
     unsigned kmask = 0, tmask = 0, pmask = 0, last_bar = 0, last_awake = 0, logged = 0, last_pad = 0;
     int pressed = -1, open_menu = 0, bar_dirty = 1, last_fps = -1, r, zone = 0;   /* zone: 0 none, 1 bar, 2 pad */
-    int s_touch = cfg.touchpad, s_alpha = cfg.touch_alpha, s_size = cfg.touch_size;
+    int s_touch = cfg.touchpad, s_alpha = cfg.touch_alpha, s_size = cfg.touch_size, s_4way = cfg.dpad_4way;
 
     fill(0, BAR_Y, SCR_W, BAR_H, C_FOOT);
     ov_setup();
@@ -1208,8 +1224,8 @@ static int run_game(char *newgame)
             }
             fill(0, BAR_Y, SCR_W, BAR_H, C_FOOT);
             core_redraw();
-            if (s_touch != cfg.touchpad || s_alpha != cfg.touch_alpha || s_size != cfg.touch_size) {
-                s_touch = cfg.touchpad; s_alpha = cfg.touch_alpha; s_size = cfg.touch_size;
+            if (s_touch != cfg.touchpad || s_alpha != cfg.touch_alpha || s_size != cfg.touch_size || s_4way != cfg.dpad_4way) {
+                s_touch = cfg.touchpad; s_alpha = cfg.touch_alpha; s_size = cfg.touch_size; s_4way = cfg.dpad_4way;
                 ov_on = 0;                     /* picture was restored without the controls */
             }
             ov_setup();

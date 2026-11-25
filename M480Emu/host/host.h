@@ -139,7 +139,8 @@ struct settings {
     int slot;           /* current save-state slot 0..4 */
     int touchpad;       /* on-screen D-pad and buttons over the game picture */
     int touch_alpha;    /* transparency step 0..4 = 0%, 25%, 50%, 75%, 100% (invisible but working) */
-    int touch_size;     /* 0 normal, 1 large */
+    int touch_size;     /* 0..4: very small, small, normal, large, very large */
+    int dpad_4way;      /* 0: 8 directions (diagonals), 1: 4 directions (plus only) */
     int audio_hq;       /* 0: 22050 Hz output (clean on the M480's own amplifier), 1: 44100 Hz (Bluetooth) */
     int volume;         /* 0 normal (70%), 1 quiet (45%), 2 loud (100%) */
     int keys[BIND_COUNT][2];

@@ -32,7 +32,8 @@ void cfg_defaults(void)
     cfg.stretch = 1;
     cfg.touchpad = 1;
     cfg.touch_alpha = 1;
-    cfg.touch_size = 0;
+    cfg.touch_size = 2;
+    cfg.dpad_4way = 0;
     cfg.audio_hq = 0;
     cfg.volume = 0;
     memcpy(cfg.keys, def, sizeof(def));
@@ -75,7 +76,9 @@ static void load_file(int common)
         else if (!strcmp(line, "slot")) cfg.slot = atoi(v);
         else if (!strcmp(line, "touchpad")) cfg.touchpad = atoi(v);
         else if (!strcmp(line, "touch_alpha")) cfg.touch_alpha = atoi(v);
-        else if (!strcmp(line, "touch_size")) cfg.touch_size = atoi(v);
+        else if (!strcmp(line, "touch_size")) cfg.touch_size = atoi(v) ? 3 : 2;   /* old 2-step setting */
+        else if (!strcmp(line, "touch_size5")) cfg.touch_size = atoi(v);
+        else if (!strcmp(line, "dpad_4way")) cfg.dpad_4way = atoi(v);
         else if (!strcmp(line, "audio_hq")) cfg.audio_hq = atoi(v);
         else if (!strcmp(line, "volume")) cfg.volume = atoi(v);
         else if (!strncmp(line, "key_", 4)) {
@@ -98,7 +101,8 @@ void cfg_load(void)
     if (cfg.region < 0 || cfg.region > 2) cfg.region = 0;
     if (cfg.slot < 0 || cfg.slot > 4) cfg.slot = 0;
     if (cfg.touch_alpha < 0 || cfg.touch_alpha > 4) cfg.touch_alpha = 1;
-    if (cfg.touch_size < 0 || cfg.touch_size > 1) cfg.touch_size = 0;
+    if (cfg.touch_size < 0 || cfg.touch_size > 4) cfg.touch_size = 2;
+    if (cfg.dpad_4way < 0 || cfg.dpad_4way > 1) cfg.dpad_4way = 0;
     if (cfg.audio_hq < 0 || cfg.audio_hq > 1) cfg.audio_hq = 0;
     if (cfg.volume < 0 || cfg.volume > 2) cfg.volume = 0;
 }
@@ -119,9 +123,9 @@ void cfg_save(void)
     cfg_path(path, 0);
     f = fopen(path, "w");
     if (!f) return;
-    fprintf(f, "frameskip=%d\nsound=%d\nspeed=%d\nshow_fps=%d\nregion=%d\nuse_bios=%d\ncdda=%d\nstretch=%d\nslot=%d\ntouchpad=%d\ntouch_alpha=%d\ntouch_size=%d\naudio_hq=%d\nvolume=%d\n",
+    fprintf(f, "frameskip=%d\nsound=%d\nspeed=%d\nshow_fps=%d\nregion=%d\nuse_bios=%d\ncdda=%d\nstretch=%d\nslot=%d\ntouchpad=%d\ntouch_alpha=%d\ntouch_size5=%d\ndpad_4way=%d\naudio_hq=%d\nvolume=%d\n",
             cfg.frameskip, cfg.sound, cfg.speed, cfg.show_fps, cfg.region, cfg.use_bios, cfg.cdda, cfg.stretch, cfg.slot,
-            cfg.touchpad, cfg.touch_alpha, cfg.touch_size, cfg.audio_hq, cfg.volume);
+            cfg.touchpad, cfg.touch_alpha, cfg.touch_size, cfg.dpad_4way, cfg.audio_hq, cfg.volume);
     for (i = 0; i < BIND_COUNT; i++)
         fprintf(f, "key_%s=%d,%d\n", bind_names[i], cfg.keys[i][0], cfg.keys[i][1]);
     fclose(f);
