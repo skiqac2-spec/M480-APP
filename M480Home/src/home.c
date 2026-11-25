@@ -563,9 +563,9 @@ static int load_settings(void)
         nl = wcschr(line, L'\n');
         if (nl) *nl++ = 0;
         if (wcslen(line) && line[wcslen(line) - 1] == L'\r') line[wcslen(line) - 1] = 0;
-        if (!wcsncmp(line, L"today=", 6)) g_set.replaceToday = _wtoi(line + 6);
-        else if (!wcsncmp(line, L"grid=", 5)) g_set.grid = _wtoi(line + 5) % 3;
-        else if (!wcsncmp(line, L"clock24=", 8)) g_set.clock24 = _wtoi(line + 8);
+        if (!wcsncmp(line, L"today=", 6)) g_set.replaceToday = (int)wcstol(line + 6, NULL, 10);
+        else if (!wcsncmp(line, L"grid=", 5)) g_set.grid = (int)wcstol(line + 5, NULL, 10) % 3;
+        else if (!wcsncmp(line, L"clock24=", 8)) g_set.clock24 = (int)wcstol(line + 8, NULL, 10);
         else if (!wcsncmp(line, L"favinit=", 8)) inited = 1;
         else if (!wcsncmp(line, L"fav=", 4) && g_favN < MAX_FAV) {
             wchar_t *a = line + 4, *b = wcschr(a, L'\t'), *c;
