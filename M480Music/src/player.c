@@ -77,6 +77,7 @@ typedef struct {
     DWORD limiterHits;
     int openFailed;
     int bt;              /* 블루투스 호환 출력 중 */
+    int reopens;
     int btDetected;
 } Status;
 static Status g_st;
@@ -162,6 +163,8 @@ typedef struct {
     int btDetected;
     DWORD lastPoll, lastDone;
     int needReopen;
+    DWORD lastReopen;
+    int prio;
 } Audio;
 static Audio A;
 
@@ -199,7 +202,7 @@ static int out_open(int rate, int ch)
     }
     A.outRate = rate;
     A.outCh = ch;
-    A.bufFrames = rate / 5;                 /* 200ms */
+    A.bufFrames = (rate / 5) & ~511;        /* 약 200ms, 512프레임 단위 (블루투스 SBC 블록과 맞춤) */
     for (i = 0; i < NBUF; i++) {
         A.buf[i] = (short *)malloc((size_t)(A.bufFrames * ch) * sizeof(short));
         memset(&A.hdr[i], 0, sizeof(WAVEHDR));
@@ -348,7 +351,8 @@ static void restart_output(DWORD posMs)
     A.primed = 0;
     A.lastDone = GetTickCount();
     waveOutPause(A.hwo);
-    for (i = 0; i < NBUF && !A.eof; i++) {
+    /* 처음엔 4개(약 0.8초)만 채우고 나머지는 재생하면서 조금씩 */
+    for (i = 0; i < 4 && !A.eof; i++) {
         int n = fill_one(i);
         if (n > 0) write_one(i, n);
     }
@@ -433,20 +437,21 @@ static void start_track(int index, DWORD startMs)
     restart_output(startMs);
 }
 
-static void auto_drop(const char *why)
+static int auto_drop(const char *why)
 {
     (void)why;
-    if (g_set.qmode != 0 || A.curLevel >= 3 || bt_active()) return;
+    if (g_set.qmode != 0 || A.curLevel >= 3 || bt_active()) return 0;
     A.curLevel++;
     g_set.autoLevel = A.curLevel;
     A.underrunsWindow = 0;
     A.busyMs = A.audioMsDone = 0;
     reconfigure();
+    return 1;
 }
 
 static void service(void)
 {
-    int i, queuedNow = 0, freed = 0;
+    int i, queuedNow = 0, freed = 0, filled;
     for (i = 0; i < NBUF; i++) {
         if (A.queued[i] && (A.hdr[i].dwFlags & WHDR_DONE)) { A.queued[i] = 0; freed++; }
         if (A.queued[i]) queuedNow++;
@@ -458,18 +463,22 @@ static void service(void)
         if (now - A.underrunTick > 20000) A.underrunsWindow = 0;
         A.underrunTick = now;
         A.underrunsWindow++;
-        if (A.underrunsWindow >= 2) { auto_drop("underrun"); return; }
+        if (A.underrunsWindow >= 2 && auto_drop("underrun")) return;
     }
     if (freed) { A.primed = 1; A.lastDone = GetTickCount(); }
-    else if (queuedNow > 0 && GetTickCount() - A.lastDone > 4000) {
-        /* 4초 넘게 버퍼가 하나도 안 끝남 = 출력 장치가 바뀌었거나 멈춤 → 다시 열기 */
-        g_st.underruns++;
+    else if (queuedNow > 0 && GetTickCount() - A.lastDone > 6000 &&
+             GetTickCount() - A.lastReopen > 20000) {
+        /* 6초 넘게 버퍼가 하나도 안 끝남 = 출력 장치가 바뀌었거나 멈춤 → 다시 열기 (20초에 한 번까지) */
+        A.lastReopen = GetTickCount();
+        g_st.reopens++;
         reconfigure2(1);
         return;
     }
 
-    for (i = 0; i < NBUF && !A.eof; i++) {
+    /* 한 번에 몰아서 디코딩하지 않고 조금씩 채움: 블루투스 전송 스레드가 CPU를 뺏기지 않게 */
+    for (i = 0, filled = 0; i < NBUF && !A.eof && filled < 2; i++) {
         if (!A.queued[i]) {
+            filled++;
             DWORD t0 = GetTickCount();
             int n = fill_one(i);
             A.busyMs += GetTickCount() - t0;
@@ -484,7 +493,7 @@ static void service(void)
         int load = (int)(A.busyMs * 100 / A.audioMsDone);
         g_st.loadPct = load;
         A.busyMs = A.audioMsDone = 0;
-        if (load >= 75) { auto_drop("cpu"); return; }
+        if (load >= 75 && auto_drop("cpu")) return;
     }
 
     if (A.eof) {
@@ -500,7 +509,8 @@ static void service(void)
 static DWORD WINAPI audio_thread(LPVOID unused)
 {
     (void)unused;
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    A.prio = THREAD_PRIORITY_ABOVE_NORMAL;
+    SetThreadPriority(GetCurrentThread(), A.prio);
     A.curLevel = (g_set.autoLevel >= 0 && g_set.autoLevel <= 3) ? g_set.autoLevel : 1;
     A.devCount = A.devBase = waveOutGetNumDevs();
     /* 이미 블루투스가 연결된 상태로 시작했을 수 있으므로 이름으로 확인 */
@@ -577,6 +587,12 @@ static DWORD WINAPI audio_thread(LPVOID unused)
                     else reconfigure2(1);
                 }
             }
+        }
+        /* 블루투스 중에는 우리 스레드 우선순위를 낮춰 BT 스택(SBC 인코딩/전송)이 먼저 돌게 함.
+         * 버퍼가 2초 있으므로 보통 우선순위로도 충분 */
+        {
+            int want = bt_active() ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_ABOVE_NORMAL;
+            if (want != A.prio) { SetThreadPriority(GetCurrentThread(), want); A.prio = want; }
         }
         if (A.playing && !A.paused && A.hwo) service();
         publish();
@@ -1613,8 +1629,9 @@ static void set_row_text(int i, const Status *st, const wchar_t **label, wchar_t
     case 6: *label = L"출력"; *kind = 1;
         if (st->openFailed) wcscpy(val, L"오디오 장치 오류");
         else if (st->srcType)
-            wsprintfW(val, L"%s%d.%dkHz %s · 끊김 %d", st->bt ? L"BT " : L"", st->outRate / 1000, (st->outRate % 1000) / 100,
-                      st->outCh == 2 ? L"스테레오" : L"모노", st->underruns);
+            wsprintfW(val, L"%s%d.%dk %s · 끊김%d · 부하%d%%%s", st->bt ? L"BT " : L"", st->outRate / 1000, (st->outRate % 1000) / 100,
+                      st->outCh == 2 ? L"스테레오" : L"모노", st->underruns + st->reopens, st->loadPct,
+                      st->reopens ? L" · 재연결" : L"");
         else wcscpy(val, L"-");
         break;
     default: *label = L"앱 종료"; *kind = 2; break;
@@ -2146,7 +2163,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_tick++;
             if (st.state == 1) { g_set.lastPosMs = st.posMs; SystemIdleTimerReset(); }
             /* 화면 안 바뀌면 다시 그리지 않음 (배터리) */
-            if (st.state == 1 || st.state != lastState || st.posMs / 1000 != lastPos / 1000) redraw();
+            /* 화면 그리기도 CPU를 쓰므로: 이퀄라이저가 보이는 보관함만 자주, 나머지는 1초에 한 번 */
+            if (st.state != lastState || st.posMs / 1000 != lastPos / 1000 ||
+                (st.state == 1 && g_scr == SCR_LIB && !(g_tick & 1))) redraw();
             lastState = st.state;
             lastPos = st.posMs;
         }

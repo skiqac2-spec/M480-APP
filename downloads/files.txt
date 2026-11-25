@@ -19,10 +19,10 @@ AbyssLabyrinth/Abyss_WM61.exe	153088	게임 실행 파일
 ../AbyssLabyrinth/data/abyss_hero.dat	17357332	주인공 장비별 그래픽 17MB (exe와 같은 폴더)	AbyssLabyrinth/abyss_hero.dat
 ../AbyssLabyrinth/data/abyss_snd.dat	8093802	음악·효과음 8MB (exe와 같은 폴더)	AbyssLabyrinth/abyss_snd.dat
 ../AbyssLabyrinth/README.txt	3369	게임 설명서	AbyssLabyrinth/README.txt
-@M480Music	M480 뮤직 2.2 (블루투스 이어폰 대응)	2026-11-25
-M480Music/M480Music.cab	97353	설치 파일 - 누르면 설치
-M480Music/M480Music.exe	156672	설치 없이 쓰는 실행 파일
-M480Music/README.txt	4990	사용 설명서
+@M480Music	M480 뮤직 2.3 (블루투스 잡음 수정)	2026-11-25
+M480Music/M480Music.cab	97629	설치 파일 - 누르면 설치
+M480Music/M480Music.exe	157184	설치 없이 쓰는 실행 파일
+M480Music/README.txt	5264	사용 설명서
 @M480Tube	M480Tube 유튜브 뷰어 2.9.2	2026-11-24
 M480Tube/M480Tube.cab	1286603	설치 파일 - 누르면 설치
 M480Tube/M480Tube.exe	2735616	설치 없이 쓰는 실행 파일
