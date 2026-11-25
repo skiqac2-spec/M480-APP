@@ -7,6 +7,7 @@
  *  - 설정: 소리 크기, 화면 끄기, 오늘 화면 대신 쓰기, 자동 시작, 아이콘 크기, 시계 형식
  *  - 배경화면: 기본 색 배경 9가지 또는 내 사진(JPG/PNG/BMP), 어둡게 조절
  *  - 아이콘 자리: 꾹 누른 채 끌어서 아무 칸에나 (빈칸 허용, 화면 끝에 대면 페이지 넘김)
+ *  - 홈 맨 위 Wi-Fi·블루투스 단추: 누르면 켜기/끄기·설정 열기 메뉴, 꾹 누르면 설정 바로 열기
  *  - 오늘(Today) 화면이 앞으로 나오면 자동으로 M480Home을 대신 보여 줌 (설정에서 끌 수 있음)
  *
  * 키: 방향키 이동, 가운데(확인) 실행, 왼쪽 소프트키 전체 앱, 오른쪽 소프트키 실행 중, 뒤로 = 홈
@@ -32,7 +33,7 @@
 
 #define APP_CLASS L"M480HomeWnd"
 #define APP_TITLE L"M480 홈"
-#define APP_VER   L"1.1"
+#define APP_VER   L"1.2"
 
 #ifndef VK_OFF
 #define VK_OFF 0xDF
@@ -129,7 +130,7 @@ static void grid_dims(int *cols, int *rows);
 
 /* 눌림 영역 */
 enum {
-    H_NONE, H_TILE, H_EMPTY, H_WDIM, H_WPRESET, H_WPIC, H_NAV_ALL, H_NAV_RUN, H_NAV_SET, H_BACK, H_ROW, H_CLOSE, H_CLOSEALL,
+    H_NONE, H_TILE, H_EMPTY, H_QWIFI, H_QBT, H_WDIM, H_WPRESET, H_WPIC, H_NAV_ALL, H_NAV_RUN, H_NAV_SET, H_BACK, H_ROW, H_CLOSE, H_CLOSEALL,
     H_VOLDN, H_VOLUP, H_OFF, H_OPT, H_MENU, H_MENU_BG, H_DOT, H_DONE
 };
 typedef struct { RECT r; int id, arg; } Hit;
@@ -138,7 +139,7 @@ static Hit g_hit[MAX_HIT];
 static int g_hitN;
 
 /* 꾹 누르면 나오는 메뉴 */
-enum { M_FAV_REMOVE = 1, M_ALL_ADD, M_ALL_REMOVE, M_RUN_CLOSE, M_CANCEL };
+enum { M_FAV_REMOVE = 1, M_ALL_ADD, M_ALL_REMOVE, M_RUN_CLOSE, M_WIFI_TOGGLE, M_WIFI_SET, M_BT_TOGGLE, M_BT_SET, M_CANCEL };
 static struct {
     int on, target;
     wchar_t title[64];
@@ -833,6 +834,157 @@ static void set_volume(int lv)
     redraw();
 }
 
+/* ------------------------------------------------------------------ */
+/* Wi-Fi / 블루투스                                                     */
+/*  - 무선 전원: ossvcs.dll (서수 276 GetWirelessDevices, 273 ChangeRadioState, 280 FreeDeviceList) */
+/*  - 블루투스: bthutil.dll BthGetMode / BthSetMode (없으면 위 무선 목록으로)  */
+/* ------------------------------------------------------------------ */
+typedef struct MyRDD {
+    LPWSTR pszDeviceName, pszDisplayName;
+    DWORD dwState, dwDesired;
+    int DeviceType;                 /* 1 Wi-Fi(전원 관리), 2 전화, 3 블루투스 */
+    struct MyRDD *pNext;
+} MyRDD;
+typedef HRESULT (*PFN_GetWD)(MyRDD **, DWORD);
+typedef HRESULT (*PFN_ChgRS)(MyRDD *, DWORD, int);
+typedef HRESULT (*PFN_FreeDL)(MyRDD *);
+typedef int (*PFN_BthGet)(DWORD *);
+typedef int (*PFN_BthSet)(DWORD);
+static PFN_GetWD pGetWD;
+static PFN_ChgRS pChgRS;
+static PFN_FreeDL pFreeDL;
+static PFN_BthGet pBthGet;
+static PFN_BthSet pBthSet;
+static int g_wifi = -1, g_bt = -1;  /* -1 없음, 0 꺼짐, 1 켜짐 */
+
+static void radio_init(void)
+{
+    HMODULE h = LoadLibraryW(L"ossvcs.dll");
+    if (h) {
+        pGetWD = (PFN_GetWD)GetProcAddressW(h, (LPCWSTR)276);
+        pChgRS = (PFN_ChgRS)GetProcAddressW(h, (LPCWSTR)273);
+        pFreeDL = (PFN_FreeDL)GetProcAddressW(h, (LPCWSTR)280);
+    }
+    h = LoadLibraryW(L"bthutil.dll");
+    if (h) {
+        pBthGet = (PFN_BthGet)GetProcAddressW(h, L"BthGetMode");
+        pBthSet = (PFN_BthSet)GetProcAddressW(h, L"BthSetMode");
+    }
+}
+
+static void radio_read(void)
+{
+    MyRDD *list = NULL, *d;
+    g_wifi = -1; g_bt = -1;
+    if (pGetWD && pGetWD(&list, 0) == S_OK) {
+        for (d = list; d; d = d->pNext) {
+            if (d->DeviceType == 1 && g_wifi != 1) g_wifi = d->dwState ? 1 : 0;
+            if (d->DeviceType == 3 && g_bt != 1) g_bt = d->dwState ? 1 : 0;
+        }
+        if (list && pFreeDL) pFreeDL(list);
+    }
+    if (pBthGet) {
+        DWORD m = 0;
+        if (pBthGet(&m) == 0) g_bt = m ? 1 : 0;
+    }
+#ifdef PREVIEW_W
+    g_wifi = 1; g_bt = 0;
+#endif
+}
+
+static int radio_set_rdd(int type, int on)
+{
+    MyRDD *list = NULL, *d;
+    int ok = 0;
+    if (!pGetWD || !pChgRS || pGetWD(&list, 0) != S_OK) return 0;
+    for (d = list; d; d = d->pNext)
+        if (d->DeviceType == type) {
+            HRESULT r = pChgRS(d, on ? 1 : 0, 2 /* 상태 저장 */);
+            if (r == S_OK || r == S_FALSE) ok = 1;
+        }
+    if (list && pFreeDL) pFreeDL(list);
+    return ok;
+}
+
+static void wifi_set(int on)
+{
+    toast(on ? L"Wi-Fi 켜는 중…" : L"Wi-Fi 끄는 중…");
+    InvalidateRect(g_hwnd, NULL, FALSE);
+    UpdateWindow(g_hwnd);
+    if (!radio_set_rdd(1, on)) toast(L"Wi-Fi를 바꾸지 못했어요. 'Wi-Fi 설정 열기'로 해 주세요");
+    else toast(on ? L"Wi-Fi를 켰어요 (연결까지 몇 초 걸려요)" : L"Wi-Fi를 껐어요");
+    radio_read();
+    SetTimer(g_hwnd, 7, 3000, NULL);    /* 잠시 뒤 연결 상태 다시 읽기 */
+    redraw();
+}
+
+static void bt_set(int on)
+{
+    int ok = 0;
+    toast(on ? L"블루투스 켜는 중…" : L"블루투스 끄는 중…");
+    InvalidateRect(g_hwnd, NULL, FALSE);
+    UpdateWindow(g_hwnd);
+    if (pBthSet && pBthSet(on ? 1 /* 연결 가능 */ : 0) == 0) ok = 1;
+    if (!ok) ok = radio_set_rdd(3, on);
+    if (!ok) toast(L"블루투스를 바꾸지 못했어요. '블루투스 설정 열기'로 해 주세요");
+    else toast(on ? L"블루투스를 켰어요" : L"블루투스를 껐어요");
+    radio_read();
+    redraw();
+}
+
+/* 설정 화면 열기 */
+static int run_cmd(const wchar_t *exe, const wchar_t *args)
+{
+    PROCESS_INFORMATION pi;
+    if (!file_exists(exe)) return 0;
+    if (CreateProcessW(exe, (LPWSTR)args, NULL, NULL, FALSE, 0, NULL, NULL, NULL, &pi)) {
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        return 1;
+    }
+    return 0;
+}
+
+static void open_wifi_settings(void)
+{
+    /* 무선 네트워크 목록이 있는 '네트워크 카드' 설정 */
+    if (run_cmd(L"\\Windows\\ctlpnl.exe", L"cplmain.cpl,17")) toast(L"Wi-Fi 설정을 여는 중…");
+    else toast(L"Wi-Fi 설정을 열 수 없어요");
+}
+
+static void open_bt_settings(void)
+{
+    static const wchar_t *oem[] = { L"\\Windows\\BtExplorer.exe", L"\\Windows\\bthsettings.exe", NULL };
+    int i;
+    for (i = 0; oem[i]; i++) if (run_cmd(oem[i], NULL)) { toast(L"블루투스 설정을 여는 중…"); return; }
+    if (run_cmd(L"\\Windows\\ctlpnl.exe", L"cplmain.cpl,23")) toast(L"블루투스 설정을 여는 중…");
+    else toast(L"블루투스 설정을 열 수 없어요");
+}
+
+static void menu_open(const wchar_t *title, int target);
+static void menu_item(int act, const wchar_t *label);
+
+static void quick_menu(int which)
+{
+    static wchar_t title[40];
+    if (which == 0) {
+        _snwprintf(title, 40, L"Wi-Fi · %s", g_wifi < 0 ? L"찾을 수 없음" : !g_wifi ? L"꺼짐" : g_net ? L"연결됨" : L"켜짐 (연결 안 됨)");
+        menu_open(title, 0);
+        g_menu.hint = L"꾹 누르면 설정이 바로 열려요";
+        if (g_wifi >= 0) menu_item(M_WIFI_TOGGLE, g_wifi ? L"Wi-Fi 끄기" : L"Wi-Fi 켜기");
+        menu_item(M_WIFI_SET, L"Wi-Fi 설정 열기");
+    } else {
+        _snwprintf(title, 40, L"블루투스 · %s", g_bt < 0 ? L"찾을 수 없음" : g_bt ? L"켜짐" : L"꺼짐");
+        menu_open(title, 0);
+        g_menu.hint = L"꾹 누르면 설정이 바로 열려요";
+        if (g_bt >= 0 || pBthSet) menu_item(M_BT_TOGGLE, g_bt == 1 ? L"블루투스 끄기" : L"블루투스 켜기");
+        menu_item(M_BT_SET, L"블루투스 설정 열기");
+    }
+    menu_item(M_CANCEL, L"닫기");
+    wcsncpy(g_menu.title, title, 63);
+    g_focus = -1;
+    redraw();
+}
+
 static void screen_off(void)
 {
     keybd_event(VK_OFF, 0, KEYEVENTF_SILENT, 0);
@@ -1047,12 +1199,51 @@ static int home_pages(void)
     return n;
 }
 
+static void glyph_wifi(int cx, int cy, COLORREF c)
+{
+    int i;
+    for (i = 0; i < 4; i++) fill(cx - S(9) + i * S(5), cy + S(5) - i * S(3) - S(2), S(3), S(2) + i * S(3) + 1, c);
+}
+static void glyph_bt(int cx, int cy, COLORREF c)
+{
+    POINT p[6];
+    HPEN pen = CreatePen(PS_SOLID, S(2), c), op = (HPEN)SelectObject(g_dc, pen);
+    p[0].x = cx - S(4); p[0].y = cy - S(4);
+    p[1].x = cx + S(4); p[1].y = cy + S(3);
+    p[2].x = cx;        p[2].y = cy + S(7);
+    p[3].x = cx;        p[3].y = cy - S(7);
+    p[4].x = cx + S(4); p[4].y = cy - S(3);
+    p[5].x = cx - S(4); p[5].y = cy + S(4);
+    Polyline(g_dc, p, 6);
+    SelectObject(g_dc, op);
+    DeleteObject(pen);
+}
+
+static void quick_button(int x, int y, int w, int h, int id, int which)
+{
+    int st = which == 0 ? g_wifi : g_bt;
+    const wchar_t *lab = st < 0 ? L"없음" : !st ? L"꺼짐" : (which == 0 && !g_net) ? L"켜짐" : (which == 0 ? L"연결됨" : L"켜짐");
+    COLORREF bg = pressed(id, 0) ? C_PRESS : st == 1 ? (which == 0 ? RGB(40, 120, 220) : RGB(40, 110, 230)) : C_CARD;
+    COLORREF fg = st == 1 ? C_TEXT : C_SUB;
+    rrect(x, y, w, h, S(9), bg);
+    if (which == 0) glyph_wifi(x + w / 2, y + S(12), fg);
+    else glyph_bt(x + w / 2, y + S(13), fg);
+    if (which == 0 && st == 1 && g_net) circle(x + w - S(7), y + S(7), S(3), C_OK);
+    {
+        int sh = g_shadow;
+        g_shadow = 0;
+        text(fSmall, fg, x, y + h - S(18), w, S(16), lab, 1);
+        g_shadow = sh;
+    }
+    hit_add(x, y, w, h, id, 0);
+}
+
 static void paint_header(void)
 {
     SYSTEMTIME st;
-    wchar_t clk[16], ap[8], d1[24], d2[16], bt[16];
-    static const wchar_t *wd[7] = { L"일요일", L"월요일", L"화요일", L"수요일", L"목요일", L"금요일", L"토요일" };
-    int cw, x, bx, by, bw, bh, lv;
+    wchar_t clk[16], ap[8], d1[24], d2[24];
+    static const wchar_t *wd[7] = { L"일", L"월", L"화", L"수", L"목", L"금", L"토" };
+    int cw, x, bx, by, bw, bh, lv, qw = S(46), qh = S(42), qx;
     COLORREF bc;
     GetLocalTime(&st);
     ap[0] = 0;
@@ -1064,32 +1255,30 @@ static void paint_header(void)
         _snwprintf(clk, 16, L"%d:%02d", h12, st.wMinute);
         wcscpy(ap, st.wHour < 12 ? L"오전" : L"오후");
     }
-    _snwprintf(d1, 24, L"%d월 %d일", st.wMonth, st.wDay);
-    wcscpy(d2, wd[st.wDayOfWeek % 7]);
-    x = S(12);
+    _snwprintf(d1, 24, L"%d월 %d일 %s", st.wMonth, st.wDay, wd[st.wDayOfWeek % 7]);
+    x = S(10);
     if (ap[0]) { text(fBold, C_SUB, x, S(8), S(30), HEAD_H - S(16), ap, 0); x += S(30); }
     cw = text(fClock, C_TEXT, x, S(4), S(120), HEAD_H - S(8), clk, 0);
-    x += cw + S(10);
-    text(fBold, C_TEXT, x, S(10), S(90), S(18), d1, 0);
-    text(fSmall, C_SUB, x, S(28), S(90), S(16), d2, 0);
+    x += cw + S(8);
+    qx = W - S(6) - qw * 2 - S(5);
+    text(fBold, C_TEXT, x, S(8), qx - x - S(4), S(18), d1, 0);
 
-    /* 배터리 */
-    bw = S(26); bh = S(13);
-    bx = W - S(12) - bw - S(3);
-    by = S(12);
+    /* 배터리 (날짜 아래) */
+    bw = S(22); bh = S(11);
+    bx = x; by = S(30);
     lv = g_batt < 0 ? 0 : g_batt;
     bc = g_charging ? C_OK : lv <= 15 ? C_BAD : lv <= 30 ? C_WARN : C_TEXT;
-    frame(bx, by, bw, bh, S(2), S(1) > 1 ? S(1) : 1, C_SUB);
-    fill(bx + bw, by + S(4), S(3), bh - S(8), C_SUB);
+    frame(bx, by, bw, bh, S(2), 1, C_SUB);
+    fill(bx + bw, by + S(3), S(2), bh - S(6), C_SUB);
     if (g_batt >= 0) fill(bx + S(2), by + S(2), (bw - S(4)) * lv / 100, bh - S(4), bc);
-    if (g_batt >= 0) _snwprintf(bt, 16, g_charging ? L"충전 %d%%" : L"%d%%", g_batt);
-    else wcscpy(bt, L"--");
-    text(fBold, bc, bx - S(80), by - S(2), S(74), bh + S(4), bt, 2);
-
-    /* 인터넷 */
-    circle(W - S(18), S(37), S(4), g_net ? C_OK : C_DIM);
-    text(fSmall, g_net ? C_SUB : C_DIM, W - S(130), S(29), S(104), S(16), g_net ? L"인터넷 연결됨" : L"인터넷 안 됨", 2);
+    if (g_batt >= 0) _snwprintf(d2, 24, g_charging ? L"충전 %d%%" : L"%d%%", g_batt);
+    else wcscpy(d2, L"--");
+    text(fSmall, bc, bx + bw + S(6), by - S(3), qx - bx - bw - S(8), bh + S(6), d2, 0);
     g_shadow = 0;
+
+    /* Wi-Fi · 블루투스 단추 */
+    quick_button(qx, S(4), qw, qh, H_QWIFI, 0);
+    quick_button(qx + qw + S(5), S(4), qw, qh, H_QBT, 1);
     if (!g_wall) fill(0, HEAD_H - 1, W, 1, C_SEP);
 }
 
@@ -1776,6 +1965,13 @@ static void menu_item(int act, const wchar_t *label)
 
 static void long_press(int id, int arg)
 {
+    if (id == H_QWIFI || id == H_QBT) {
+        if (id == H_QWIFI) open_wifi_settings(); else open_bt_settings();
+        t_down = 0;
+        ReleaseCapture();
+        redraw();
+        return;
+    }
     if (id == H_TILE && arg < g_favN) {
         /* 들어 올림: 이대로 끌면 옮기기, 그냥 떼면 메뉴 */
         g_lift = arg;
@@ -1822,6 +2018,10 @@ static void menu_do(int i)
         _snwprintf(m, 96, L"%s 을(를) 홈에서 뺐어요", g_all[t].name); toast(m);
         break;
     case M_RUN_CLOSE: run_close(t); break;
+    case M_WIFI_TOGGLE: wifi_set(g_wifi != 1); break;
+    case M_WIFI_SET: open_wifi_settings(); break;
+    case M_BT_TOGGLE: bt_set(g_bt != 1); break;
+    case M_BT_SET: open_bt_settings(); break;
     }
     redraw();
 }
@@ -1895,6 +2095,8 @@ static void activate(int id, int arg)
     case H_MENU: menu_do(arg); break;
     case H_MENU_BG: g_menu.on = 0; redraw(); break;
     case H_DOT: g_page = arg; redraw(); break;
+    case H_QWIFI: radio_read(); quick_menu(0); break;
+    case H_QBT: radio_read(); quick_menu(1); break;
     case H_WDIM: g_set.wallDim = (g_set.wallDim + 1) % 3; build_wall(); save_settings(); redraw(); break;
     case H_WPRESET: set_wall(arg, NULL); break;
     case H_WPIC: if (arg < g_picN) set_wall(WALL_PHOTO, g_pic[arg]); break;
@@ -1933,7 +2135,7 @@ static void on_down(int x, int y)
     SetCapture(g_hwnd);
     if (t_hit >= 0) {
         int id = g_hit[t_hit].id;
-        if (id == H_TILE || id == H_ROW) SetTimer(g_hwnd, 3, 550, NULL);
+        if (id == H_TILE || id == H_ROW || id == H_QWIFI || id == H_QBT) SetTimer(g_hwnd, 3, 550, NULL);
     }
     redraw();
 }
@@ -2192,9 +2394,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             GetLocalTime(&st);
             if (++tick % 10 == 0) {          /* 5초마다 배터리·인터넷·실행 중 */
                 int b = g_batt, c = g_charging, n = g_net, r = g_runN;
+                int wf = g_wifi, bt = g_bt;
                 read_status();
-                if (GetForegroundWindow() == g_hwnd && g_scr != SCR_RUN) scan_running();
-                if (b != g_batt || c != g_charging || n != g_net || r != g_runN) redraw();
+                if (GetForegroundWindow() == g_hwnd) {
+                    radio_read();
+                    if (g_scr != SCR_RUN) scan_running();
+                }
+                if (b != g_batt || c != g_charging || n != g_net || r != g_runN || wf != g_wifi || bt != g_bt) redraw();
             }
             if (st.wMinute != g_lastMin) { g_lastMin = st.wMinute; if (g_scr == SCR_HOME) redraw(); }
         } else if (wp == 2) on_inertia();
@@ -2210,6 +2416,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_dragging && g_dx < S(18) && g_page > 0) { g_page--; g_hover = pos_from_xy(g_dx, g_dy); redraw(); }
             else if (g_dragging && g_dx > W - S(18) && g_page < home_pages() - 1) { g_page++; g_hover = pos_from_xy(g_dx, g_dy); redraw(); }
             else KillTimer(hwnd, 6);
+        } else if (wp == 7) {
+            KillTimer(hwnd, 7);
+            read_status();
+            radio_read();
+            redraw();
         } else if (wp == 5) {
             KillTimer(hwnd, 5);
             scan_running();
@@ -2220,6 +2431,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (LOWORD(wp) != WA_INACTIVE) {
             fit_window();
             read_status();
+            radio_read();
             scan_running();
             redraw();
         }
@@ -2291,6 +2503,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
     fLetterB = make_font(S(26), 1);
 
     load_funcs();
+    radio_init();
     scan_all();
     if (!load_settings()) {
         fav_defaults();

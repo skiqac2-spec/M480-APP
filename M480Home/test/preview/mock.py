@@ -30,12 +30,25 @@ _txt=None
 # WM 작업 표시줄 흉내
 d.rectangle([0,0,W*SC,TB*SC],fill=(40,60,110)); d.text((6*SC,5*SC),"⊞  시작",font=F(12,1),fill=(255,255,255))
 # 머리
-x=12; cw=txt(fClock,TEXT,x,4,120,42,"08:25"); x+=cw+10
-txt(fBold,TEXT,x,10,90,18,"11월 26일"); txt(fSmall,SUB,x,28,90,16,"목요일")
-bx=W-12-26-3; by=12; rr(bx,by,26,13,2,None,SUB,1); fill(bx+26,by+4,3,5,SUB); fill(bx+2,by+2,22*76//100,9,TEXT)
-txt(fBold,TEXT,bx-80,by-2,74,17,"76%",2)
-d.ellipse(R(W-22,33,9,9),fill=OK); txt(fSmall,SUB,W-130,29,104,16,"인터넷 연결됨",2)
-
+x=10; cw=txt(fClock,TEXT,x,4,120,42,"08:25"); x+=cw+8
+qw,qh=46,42; qx=W-6-qw*2-5
+txt(fBold,TEXT,x,8,qx-x-4,18,"11월 26일 목")
+bx=x; by=30; rr(bx,by,22,11,2,None,SUB,1); fill(bx+22,by+3,2,5,SUB); fill(bx+2,by+2,18*76//100,7,TEXT)
+txt(fSmall,TEXT,bx+28,by-3,60,17,"76%")
+SHADOW[0]=False
+# Wi-Fi (켜짐·연결됨)
+rr(qx,4,qw,qh,9,(40,120,220))
+cx=qx+qw//2; cy=4+12
+for i in range(4): fill(cx-9+i*5,cy+5-i*3-2,3,2+i*3+1,TEXT)
+d.ellipse(R(qx+qw-10,4+4,6,6),fill=OK)
+txt(fSmall,TEXT,qx,4+qh-18,qw,16,"연결됨",1)
+# 블루투스 (꺼짐)
+x2=qx+qw+5; rr(x2,4,qw,qh,9,CARD)
+cx=x2+qw//2; cy=4+13
+pts=[(cx-4,cy-4),(cx+4,cy+3),(cx,cy+7),(cx,cy-7),(cx+4,cy-3),(cx-4,cy+4)]
+d.line([(px*SC,(py+TB)*SC) for px,py in pts],fill=SUB,width=2*SC,joint="curve")
+txt(fSmall,SUB,x2,4+qh-18,qw,16,"꺼짐",1)
+SHADOW[0]=True
 # 칸
 apps=["웹 브라우저","유튜브","음악",None,None,None,"게임 에뮬","피처폰 게임","만화"]  # 위 줄과 아래 줄만 쓰고 가운데는 비움
 cols,rows=3,3; top=52; bottom=H-44-12; gw=(W-8)//cols; gh=(bottom-top)//rows
