@@ -12,10 +12,21 @@ im = Image.new("RGB", (W*SC, (H+TB)*SC), BG); d = ImageDraw.Draw(im)
 def R(x,y,w,h): return [x*SC,(y+TB)*SC,(x+w)*SC-1,(y+h+TB)*SC-1]
 def fill(x,y,w,h,c): d.rectangle(R(x,y,w,h), fill=c)
 def rr(x,y,w,h,r,c,outline=None,wd=0): d.rounded_rectangle(R(x,y,w,h), radius=r*SC, fill=c, outline=outline, width=wd*SC)
+SHADOW=[True]
 def txt(f,c,x,y,w,h,s,al=0):
     bb=d.textbbox((0,0),s,font=f); tw=bb[2]-bb[0]; th=f.size
     X=x*SC+(0 if al==0 else (w*SC-tw)//2 if al==1 else w*SC-tw); Y=(y+TB)*SC+(h*SC-th)//2-bb[1]//3
+    if SHADOW[0]: d.text((X+SC,Y+SC),s,font=f,fill=(0,0,0))
     d.text((X,Y),s,font=f,fill=c); return tw//SC
+# 배경화면 (밤하늘, 조금 어둡게)
+A,B=(22,34,84),(8,8,24); f=176
+for y in range(H):
+    for x in range(0,W,2):
+        t=y*220//H+x*36//W
+        c=tuple((A[i]+(B[i]-A[i])*t//256)*f>>8 for i in range(3))
+        d.rectangle([x*SC,(y+TB)*SC,(x+2)*SC-1,(y+TB+1)*SC-1],fill=c)
+fill(0,H-44,W,44,BG)
+_txt=None
 # WM 작업 표시줄 흉내
 d.rectangle([0,0,W*SC,TB*SC],fill=(40,60,110)); d.text((6*SC,5*SC),"⊞  시작",font=F(12,1),fill=(255,255,255))
 # 머리
@@ -24,9 +35,9 @@ txt(fBold,TEXT,x,10,90,18,"11월 26일"); txt(fSmall,SUB,x,28,90,16,"목요일")
 bx=W-12-26-3; by=12; rr(bx,by,26,13,2,None,SUB,1); fill(bx+26,by+4,3,5,SUB); fill(bx+2,by+2,22*76//100,9,TEXT)
 txt(fBold,TEXT,bx-80,by-2,74,17,"76%",2)
 d.ellipse(R(W-22,33,9,9),fill=OK); txt(fSmall,SUB,W-130,29,104,16,"인터넷 연결됨",2)
-fill(0,49,W,1,SEP)
+
 # 칸
-apps=["웹 브라우저","유튜브","음악","만화","게임 에뮬","피처폰 게임","심연의 미궁","통화","파일 탐색기","설정"]
+apps=["웹 브라우저","유튜브","음악",None,None,None,"게임 에뮬","피처폰 게임","만화"]  # 위 줄과 아래 줄만 쓰고 가운데는 비움
 cols,rows=3,3; top=52; bottom=H-44-12; gw=(W-8)//cols; gh=(bottom-top)//rows
 def h(s):
     v=5381
@@ -34,13 +45,17 @@ def h(s):
     return v
 for i in range(9):
     X=4+(i%cols)*gw; Y=top+(i//cols)*gh; b=min(gh-22,gw-24,58); bx=X+(gw-b)//2; byy=Y+(gh-b-16)//2
-    if i==0: rr(X+2,Y+2,gw-4,gh-4,10,None,(255,150,120),2)
-    if i<len(apps):
+    
+    if i<len(apps) and apps[i] is None and i==3:
+        rr(bx,byy,b,b,b//4,None,DIM,2); fill(bx+b//2-8,byy+b//2-1,17,3,SUB); fill(bx+b//2-1,byy+b//2-8,3,17,SUB)
+        txt(fBold,SUB,X+2,byy+b+1,gw-4,16,"앱 추가",1)
+    if i<len(apps) and apps[i]:
         n=apps[i]; rr(bx,byy,b,b,b//4,PAL[h(n)%10]); txt(F(20,1),TEXT,bx,byy,b,b,n[0],1)
         txt(fBold,TEXT,X+2,byy+b+1,gw-4,16,n,1)
 # 점
 dy=H-44-6; dx=W//2-8
 for i in range(2): d.ellipse(R(dx+i*16-(4 if i==0 else 3),dy-(4 if i==0 else 3),8 if i==0 else 6,8 if i==0 else 6),fill=TEXT if i==0 else DIM)
+SHADOW[0]=False
 # 아래 단추
 y=H-44; fill(0,y,W,1,SEP); bw=W//3
 for i,l in enumerate(["전체 앱","실행 중","설정"]):
