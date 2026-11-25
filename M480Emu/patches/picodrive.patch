@@ -1,0 +1,31 @@
+--- a/cpu/drc/cmn.c
++++ b/cpu/drc/cmn.c
+@@ -14,7 +14,7 @@
+ // might be running on a 64k-page kernel
+ #define PICO_PAGE_ALIGN 65536
+ #else
+-#define PICO_PAGE_ALIGN 4096
++#define PICO_PAGE_ALIGN 8
+ #endif
+ u8 ALIGNED(PICO_PAGE_ALIGN) tcache_default[DRC_TCACHE_SIZE];
+ u8 *tcache;
+--- a/cpu/drc/cmn.h
++++ b/cpu/drc/cmn.h
+@@ -1,5 +1,5 @@
+ 
+-#define DRC_TCACHE_SIZE         (4*1024*1024)
++#define DRC_TCACHE_SIZE         (64*1024) /* no recompiler in this build */
+ 
+ extern u8 *tcache;
+ 
+--- a/pico/pico_port.h
++++ b/pico/pico_port.h
+@@ -20,7 +20,7 @@
+ 
+ #ifdef __GNUC__
+ #define NOINLINE    __attribute__((noinline))
+-#define ALIGNED(n)  __attribute__((aligned(n)))
++#define ALIGNED(n)  __attribute__((aligned((n) > 8 ? 8 : (n))))
+ #define unlikely(x) __builtin_expect((x), 0)
+ #define likely(x)   __builtin_expect(!!(x), 1)
+ #else

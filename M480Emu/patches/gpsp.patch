@@ -1,0 +1,75 @@
+--- a/arm/arm_stub.S
++++ b/arm/arm_stub.S
+@@ -3,7 +3,6 @@
+ 
+ #define defsymbl(symbol) \
+ .align 2;                \
+-.type symbol, %function ;\
+ .global symbol ;         \
+ .global _##symbol ;      \
+ symbol:                  \
+@@ -975,7 +974,7 @@
+ 
+ @ Make this section executable!
+ .text
+-.section .jit,"awx",%nobits
++.bss
+ .align 4
+ defsymbl(rom_translation_cache)
+   .space ROM_TRANSLATION_CACHE_SIZE
+--- a/cpu_threaded.c
++++ b/cpu_threaded.c
+@@ -225,7 +225,12 @@
+ 
+ /* Cache invalidation */
+ 
+-#if defined(PSP)
++#if defined(_WIN32_WCE)
++  extern void ce_flush_icache(void *start, size_t len);
++  void platform_cache_sync(void *baseaddr, void *endptr) {
++    ce_flush_icache(baseaddr, ((char*)endptr) - ((char*)baseaddr) + 64);
++  }
++#elif defined(PSP)
+   void platform_cache_sync(void *baseaddr, void *endptr) {
+     sceKernelDcacheWritebackRange(baseaddr, ((char*)endptr) - ((char*)baseaddr));
+     sceKernelIcacheInvalidateRange(baseaddr, ((char*)endptr) - ((char*)baseaddr));
+--- a/gba_memory.c
++++ b/gba_memory.c
+@@ -2540,7 +2540,13 @@
+   gamepak_buffer_count = 0;
+   while (gamepak_buffer_count < ROM_BUFFER_SIZE)
+   {
++#ifdef _WIN32_WCE
++    /* 1MB blocks would fill the 32MB process slot: place them in the large memory area */
++    extern void *ce_big_alloc(size_t size);
++    void *ptr = ce_big_alloc(gamepak_buffer_blocksize);
++#else
+     void *ptr = malloc(gamepak_buffer_blocksize);
++#endif
+     if (!ptr)
+       break;
+     gamepak_buffers[gamepak_buffer_count++] = (u8*)ptr;
+@@ -2640,7 +2646,14 @@
+ 
+   while (gamepak_buffer_count)
+   {
++#ifdef _WIN32_WCE
++  {
++    extern void ce_big_free(void *p);
++    ce_big_free(gamepak_buffers[--gamepak_buffer_count]);
++  }
++#else
+     free(gamepak_buffers[--gamepak_buffer_count]);
++#endif
+   }
+ 
+   if (gamepak_mini_rom)
+@@ -2982,7 +2995,7 @@
+ 
+   for (i = 0; i + sig_len <= rom_size; i++)
+   {
+-    if (memcmp(&rom[i], sig, sig_len) == 0)
++    if (rom[i] == (u8)sig[0] && memcmp(&rom[i], sig, sig_len) == 0)
+       return true;
+   }
+ 

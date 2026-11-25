@@ -1,0 +1,261 @@
+--- a/frontend/libretro.c
++++ b/frontend/libretro.c
+@@ -7,6 +7,7 @@
+ 
+ #define _GNU_SOURCE 1 // strcasestr
+ #include <stdio.h>
++#include <ctype.h>
+ #include <stdlib.h>
+ #include <stdarg.h>
+ #include <stdint.h>
+@@ -320,9 +321,7 @@
+       }
+       vout_buf_ptr = fb.data;
+       vout_pitch_b = fb.pitch;
+-      if (fb.pitch != vout_width * bytes_pp)
+-         LogWarn("got unusual pitch %zd for fmt %d resolution %dx%d\n",
+-               fb.pitch, fb.format, vout_width, vout_height);
++
+    }
+    else
+    {
+@@ -647,6 +646,27 @@
+ }
+ #endif // HAVE_LIBNX
+ 
++#ifdef _WIN32_WCE
++/* keep the emulated machine's memory out of the tiny 32MB process slot */
++extern void *ce_big_alloc(size_t size);
++extern void ce_big_free(void *p);
++static void *pl_ce_mmap(unsigned long addr, size_t size,
++    enum psxMapTag tag, int *can_retry_addr)
++{
++   void *ret;
++   (void)addr; (void)tag;
++   *can_retry_addr = 0;
++   ret = ce_big_alloc(size);
++   return ret ? ret : MAP_FAILED;
++}
++
++static void pl_ce_munmap(void *ptr, size_t size, enum psxMapTag tag)
++{
++   (void)size; (void)tag;
++   ce_big_free(ptr);
++}
++#endif
++
+ #ifdef VITA
+ typedef struct
+ {
+@@ -3789,6 +3809,9 @@
+       abort();
+    psxMapHook = pl_vita_mmap;
+    psxUnmapHook = pl_vita_munmap;
++#elif defined(_WIN32_WCE)
++   psxMapHook = pl_ce_mmap;
++   psxUnmapHook = pl_ce_munmap;
+ #endif
+    ret = emu_core_preinit();
+ #ifdef _3DS
+--- a/include/arm_features.h
++++ b/include/arm_features.h
+@@ -67,7 +67,17 @@
+ #endif
+ 
+ /* global function/external symbol */
+-#ifndef __APPLE__
++#if defined(UNDER_CE) || defined(_WIN32_WCE)
++/* PE/COFF: no ELF .type/.size */
++#define ESYM(name) name
++#define FUNCTION(name) \
++  .globl name; \
++  name
++#define ESIZE(name_, size_)
++#define EOBJECT(name_)
++#define EXTRA_UNSAVED_REGS
++
++#elif !defined(__APPLE__)
+ #define ESYM(name) name
+ 
+ #define FUNCTION(name) \
+--- a/libpcsxcore/cdriso.c
++++ b/libpcsxcore/cdriso.c
+@@ -24,6 +24,7 @@
+ #include "cdriso.h"
+ #include "ppf.h"
+ 
++#include <stdio.h>
+ #include <assert.h>
+ #include <errno.h>
+ #include <zlib.h>
+--- a/libpcsxcore/cdrom-async.c
++++ b/libpcsxcore/cdrom-async.c
+@@ -64,12 +64,12 @@
+    int check_eject_delay;
+ 
+    // single sector cache, not touched by the thread
+-   alignas(64) u8 buf_local[CD_FRAMESIZE_RAW_ALIGNED];
++   alignas(8) u8 buf_local[CD_FRAMESIZE_RAW_ALIGNED];
+ } acdrom;
+ 
+ static void lbacache_do(u32 lba, u32 cdda_bit)
+ {
+-   alignas(64) unsigned char buf[CD_FRAMESIZE_RAW_ALIGNED];
++   alignas(8) unsigned char buf[CD_FRAMESIZE_RAW_ALIGNED];
+    unsigned char msf[3], buf_sub[SUB_FRAMESIZE];
+    u32 i = lba % acdrom.buf_cnt;
+    int ret;
+--- a/libpcsxcore/cdrom.c
++++ b/libpcsxcore/cdrom.c
+@@ -126,7 +126,7 @@
+ 	u8 AttenuatorLeftToLeftT, AttenuatorLeftToRightT;
+ 	u8 AttenuatorRightToRightT, AttenuatorRightToLeftT;
+ } cdr;
+-alignas(64) static s16 read_buf[CD_FRAMESIZE_RAW_ALIGNED / 2];
++alignas(8) static s16 read_buf[CD_FRAMESIZE_RAW_ALIGNED / 2];
+ 
+ struct SubQ {
+ 	char res0[12];
+--- a/libpcsxcore/new_dynarec/assem_arm.c
++++ b/libpcsxcore/new_dynarec/assem_arm.c
+@@ -258,10 +258,21 @@
+   (void)ret;
+ }
+ 
++static void *get_trampoline(const void *f);
++
+ static u_int genjmp(u_int addr)
+ {
+   if (addr < 3) return 0; // a branch that will be patched later
+   int offset = addr-(int)out-8;
++#ifdef _WIN32_WCE
++  /* the code cache lives far away from the executable on Windows CE:
++   * route every out-of-range branch/call through the trampoline table */
++  if ((offset < -33554432 || offset >= 33554432)
++      && ((u_char *)addr < (u_char *)ndrc || (u_char *)addr >= (u_char *)ndrc + sizeof(*ndrc))) {
++    addr = (u_int)get_trampoline((void *)addr);
++    offset = addr-(int)out-8;
++  }
++#endif
+   if (offset < -33554432 || offset >= 33554432) {
+     SysPrintf("genjmp: out of range: %08x\n", offset);
+     abort();
+--- a/libpcsxcore/new_dynarec/assem_arm.h
++++ b/libpcsxcore/new_dynarec/assem_arm.h
+@@ -37,7 +37,11 @@
+ extern char *invc_ptr;
+ 
+ // note: max due to branch encoding: arm 32M, arm64 128M
++#ifdef _WIN32_WCE
++#define TARGET_SIZE_2 23 // 8 megabytes: plenty for PS1 code, kinder to a 128MB phone
++#else
+ #define TARGET_SIZE_2 24 // 2^24 = 16 megabytes
++#endif
+ 
+ struct tramp_insns
+ {
+--- a/libpcsxcore/new_dynarec/emu_if.c
++++ b/libpcsxcore/new_dynarec/emu_if.c
+@@ -600,7 +600,7 @@
+ 
+ static int ari64_init()
+ {
+-	static u32 scratch_buf[8*8*2] __attribute__((aligned(64)));
++	static u32 scratch_buf[8*8*2] __attribute__((aligned(8)));
+ 	size_t i;
+ 
+ 	new_dynarec_init();
+--- a/libpcsxcore/new_dynarec/linkage_arm.S
++++ b/libpcsxcore/new_dynarec/linkage_arm.S
+@@ -50,9 +50,7 @@
+ 
+ #define DRC_VAR_(name, vname, size_) \
+ 	vname = dynarec_local + LO_##name; \
+-	.global vname; \
+-	.type	vname, %object; \
+-	.size	vname, size_
++	.global vname
+ 
+ #define DRC_VAR(name, size_) \
+ 	DRC_VAR_(name, ESYM(name), size_)
+--- a/libpcsxcore/new_dynarec/new_dynarec.c
++++ b/libpcsxcore/new_dynarec/new_dynarec.c
+@@ -525,6 +525,8 @@
+     // as of v4.2.1 libnx lacks isb
+     __asm__ volatile("isb" ::: "memory");
+   }
++  #elif defined(_WIN32_WCE)
++  { extern void ce_flush_icache(void *start, size_t len); ce_flush_icache(start, len); }
+   #elif defined(__aarch64__)
+   // __clear_cache() doesn't handle differing cacheline sizes on big.LITTLE and
+   // leaves it to the kernel to virtualize ctr_el0, which some old kernels don't do
+--- a/plugins/dfsound/externals.h
++++ b/plugins/dfsound/externals.h
+@@ -255,7 +255,7 @@
+  unsigned int  * CDDAStart;
+  unsigned int  * CDDAEnd;
+ 
+- __attribute__((aligned(32)))
++ __attribute__((aligned(8)))
+  unsigned short  regArea[0x400];
+ 
+  sample_buf      sb[MAXCHAN];
+--- a/plugins/dfsound/spu.c
++++ b/plugins/dfsound/spu.c
+@@ -51,7 +51,7 @@
+ 
+ // globals
+ 
+-__attribute__((aligned(32)))
++__attribute__((aligned(8)))
+ SPUInfo         spu;
+ SPUConfig       spu_config;
+ 
+--- a/plugins/gpu_unai/gpu_unai.h
++++ b/plugins/gpu_unai/gpu_unai.h
+@@ -356,7 +356,7 @@
+ 	////////////////////////////////////////////////////////////////////////////
+ 	//  Inner Loop parameters
+ 
+-	__attribute__((aligned(32)))
++	__attribute__((aligned(8)))
+ 	gpu_unai_inner_t inn;
+ 
+ 	// End of inner Loop parameters
+@@ -378,7 +378,7 @@
+ 	u8  LightLUT[32*32];    // 5-bit lighting LUT (gpu_inner_light.h)
+ };
+ 
+-static __attribute__((aligned(32))) gpu_unai_t gpu_unai;
++static __attribute__((aligned(8))) gpu_unai_t gpu_unai;
+ 
+ // Global config that frontend can alter.. Values are read in GPU_init().
+ // TODO: if frontend menu modifies a setting, add a function that can notify
+--- a/plugins/gpulib/gpu.c
++++ b/plugins/gpulib/gpu.c
+@@ -309,8 +309,12 @@
+ #if GPULIB_USE_MMAP
+   gpu.vram = vram_ptr_orig = gpu.mmap(VRAM_SIZE);
+ #else
++#ifdef _WIN32_WCE
++  { extern void *ce_big_alloc(size_t size); gpu.vram = vram_ptr_orig = ce_big_alloc(VRAM_SIZE); }
++#else
+   gpu.vram = vram_ptr_orig = calloc(VRAM_SIZE, 1);
+ #endif
++#endif
+   if (gpu.vram != NULL && gpu.vram != (void *)(intptr_t)-1) {
+     // 4kb guard in front
+     gpu.vram += (4096 / 2);
+@@ -353,6 +357,8 @@
+   if (vram_ptr_orig != NULL) {
+ #if GPULIB_USE_MMAP
+     gpu.munmap(vram_ptr_orig, VRAM_SIZE);
++#elif defined(_WIN32_WCE)
++    { extern void ce_big_free(void *p); ce_big_free(vram_ptr_orig); }
+ #else
+     free(vram_ptr_orig);
+ #endif
+--- /dev/null
++++ b/include/revision.h
+@@ -0,0 +1 @@
++#define REV "r26-m480"

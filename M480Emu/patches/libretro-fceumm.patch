@@ -1,0 +1,22 @@
+--- a/src/drivers/libretro/libretro.c
++++ b/src/drivers/libretro/libretro.c
+@@ -3501,6 +3501,19 @@
+       check_variables(false);
+ 
+    FCEUD_UpdateInput();
++#ifdef _WIN32_WCE
++   {  /* the front end decides when a frame's picture may be skipped to keep full speed */
++      extern int ce_skip_frame;
++      if (ce_skip_frame)
++      {
++         FCEUI_Emulate(&gfx, &sound, &ssize, 1);
++         video_cb(NULL, 256, 240, 256 * sizeof(uint16_t));
++         stereo_filter_apply(sound, ssize);
++         audio_batch_cb((const int16_t*)sound, ssize);
++         return;
++      }
++   }
++#endif
+    FCEUI_Emulate(&gfx, &sound, &ssize, 0);
+ 
+ #ifdef HAVE_HDPACK
