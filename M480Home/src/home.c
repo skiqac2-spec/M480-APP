@@ -33,7 +33,7 @@
 
 #define APP_CLASS L"M480HomeWnd"
 #define APP_TITLE L"M480 홈"
-#define APP_VER   L"1.2"
+#define APP_VER   L"1.2.1"
 
 #ifndef VK_OFF
 #define VK_OFF 0xDF
@@ -175,6 +175,9 @@ static PFN_PowerEx pPowerEx;
 static PFN_ShellEx pShellEx;
 static PFN_FileInfo pFileInfo;
 static PFN_Special pSpecial;
+typedef BOOL (WINAPI *PFN_FullScreen)(HWND, DWORD);
+static PFN_FullScreen pFullScreen;
+static HWND g_sipHidden;    /* 우리가 숨긴 키보드 단추 창 */
 
 static void load_funcs(void)
 {
@@ -184,6 +187,8 @@ static void load_funcs(void)
     pShellEx = (PFN_ShellEx)GetProcAddressW(h, L"ShellExecuteEx");
     pFileInfo = (PFN_FileInfo)GetProcAddressW(h, L"SHGetFileInfo");
     pSpecial = (PFN_Special)GetProcAddressW(h, L"SHGetSpecialFolderPath");
+    h = LoadLibraryW(L"aygshell.dll");
+    if (h) pFullScreen = (PFN_FullScreen)GetProcAddressW(h, L"SHFullScreen");
 }
 
 /* ------------------------------------------------------------------ */
@@ -2355,6 +2360,22 @@ static void watch_today(void)
 /* ------------------------------------------------------------------ */
 /* 창                                                                   */
 /* ------------------------------------------------------------------ */
+/* 화면 아래 가운데 키보드(가) 단추가 '실행 중' 단추를 가리지 않게: M480 홈이 앞에 있을 때만 숨김 */
+static void sip_button(int hide)
+{
+    HWND sb;
+#ifndef PREVIEW_W
+    if (pFullScreen) pFullScreen(g_hwnd, hide ? 0x0008 /* SHFS_HIDESIPBUTTON */ : 0x0004 /* SHFS_SHOWSIPBUTTON */);
+#endif
+    if (hide) {
+        sb = FindWindowW(L"MS_SIPBUTTON", NULL);
+        if (sb && IsWindowVisible(sb)) { ShowWindow(sb, SW_HIDE); g_sipHidden = sb; }
+    } else if (g_sipHidden) {
+        if (IsWindow(g_sipHidden)) ShowWindow(g_sipHidden, SW_SHOW);
+        g_sipHidden = NULL;
+    }
+}
+
 static void fit_window(void)
 {
     RECT wa;
@@ -2416,6 +2437,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_dragging && g_dx < S(18) && g_page > 0) { g_page--; g_hover = pos_from_xy(g_dx, g_dy); redraw(); }
             else if (g_dragging && g_dx > W - S(18) && g_page < home_pages() - 1) { g_page++; g_hover = pos_from_xy(g_dx, g_dy); redraw(); }
             else KillTimer(hwnd, 6);
+        } else if (wp == 8) {
+            KillTimer(hwnd, 8);
+            if (GetForegroundWindow() == hwnd) sip_button(1);
         } else if (wp == 7) {
             KillTimer(hwnd, 7);
             read_status();
@@ -2429,11 +2453,16 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_ACTIVATE:
         if (LOWORD(wp) != WA_INACTIVE) {
+            sip_button(1);
+            SetTimer(hwnd, 8, 300, NULL);   /* 셸이 늦게 다시 띄우는 경우 한 번 더 */
             fit_window();
             read_status();
             radio_read();
             scan_running();
             redraw();
+        } else {
+            KillTimer(hwnd, 8);
+            sip_button(0);
         }
         break;
     case WM_SETTINGCHANGE:
@@ -2450,6 +2479,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_set.replaceToday) { go(SCR_HOME); return 0; }
         break;
     case WM_DESTROY:
+        sip_button(0);
         KillTimer(hwnd, 1);
         save_settings();
         PostQuitMessage(0);
@@ -2540,6 +2570,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
     if (!g_hwnd) return 0;
     ShowWindow(g_hwnd, show);
     UpdateWindow(g_hwnd);
+    sip_button(1);
     scan_running();
 
     while (GetMessageW(&m, NULL, 0, 0)) {
