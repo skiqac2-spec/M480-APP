@@ -435,6 +435,8 @@ struct Player {
 	volatile int state;
 	char msg[1100];
 	volatile int paused;
+	volatile int bg;              /* screen off: audio only, video decoding stopped */
+	DWORD idle_tick;
 	volatile LONG seek_gen;
 	volatile long seek_ms;
 	CRITICAL_SECTION cs;          /* drawing + shared state */
@@ -1151,6 +1153,87 @@ cleanup:
 }
 
 /* ---------------- video ---------------- */
+/* ---------------- screen off = keep playing the sound only ----------------
+   'unattended mode' keeps the CPU and the audio chip running when the power button
+   turns the screen off (same as M480Music); a power-notification queue tells us when
+   the screen is off so the video decoder can rest */
+static volatile int g_screen_off;
+#ifdef _WIN32_WCE
+typedef BOOL (WINAPI *PFN_PPN)(DWORD, DWORD);
+typedef HANDLE (WINAPI *PFN_SPR)(PVOID, int, ULONG, PVOID, ULONG);
+typedef DWORD (WINAPI *PFN_RPR)(HANDLE);
+typedef HANDLE (WINAPI *PFN_CMQ)(LPCWSTR, void *);
+typedef BOOL (WINAPI *PFN_RMQ)(HANDLE, LPVOID, DWORD, LPDWORD, DWORD, DWORD *);
+typedef HANDLE (WINAPI *PFN_RPN)(HANDLE, DWORD);
+static PFN_PPN pPPN;
+static PFN_SPR pSPR;
+static PFN_RPR pRPR;
+static HANDLE g_pwreq;
+static int g_unatt, g_pw_init;
+
+typedef struct { DWORD size, flags, maxmsgs, maxmsg; BOOL read; } MQOpts;
+typedef struct { DWORD Message, Flags, Length; WCHAR name[64]; } PwMsg;
+
+static DWORD WINAPI power_watch(LPVOID arg)
+{
+	HMODULE h = (HMODULE)arg;
+	PFN_CMQ cmq = (PFN_CMQ)GetProcAddressW(h, L"CreateMsgQueue");
+	PFN_RMQ rmq = (PFN_RMQ)GetProcAddressW(h, L"ReadMsgQueue");
+	PFN_RPN rpn = (PFN_RPN)GetProcAddressW(h, L"RequestPowerNotifications");
+	MQOpts o;
+	HANDLE q;
+	if (!cmq || !rmq || !rpn) return 0;
+	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
+	o.flags = 1;                 /* MSGQUEUE_NOPRECOMMIT */
+	o.maxmsg = sizeof(PwMsg);
+	o.read = TRUE;
+	q = cmq(NULL, &o);
+	if (!q) return 0;
+	if (!rpn(q, 0x1 /* PBT_TRANSITION */)) return 0;
+	for (;;) {
+		PwMsg m;
+		DWORD got = 0, fl = 0;
+		if (WaitForSingleObject(q, INFINITE) != WAIT_OBJECT_0) break;
+		memset(&m, 0, sizeof m);
+		if (!rmq(q, &m, sizeof m, &got, 0, &fl)) continue;
+		if (m.Message != 0x1) continue;
+		/* ON = screen on; UNATTENDED / IDLE / SUSPEND / OFF = screen off */
+		g_screen_off = (m.Flags & (0x00400000 | 0x00100000 | 0x00200000 | 0x00020000)) && !(m.Flags & 0x00010000);
+		tube_log("power: flags=%08lx -> screen %s", (unsigned long)m.Flags, g_screen_off ? "off" : "on");
+	}
+	return 0;
+}
+
+static void power_keep(int on)
+{
+	if (!g_pw_init) {
+		HMODULE h = LoadLibraryW(L"coredll.dll");
+		g_pw_init = 1;
+		if (h) {
+			HANDLE th;
+			pPPN = (PFN_PPN)GetProcAddressW(h, L"PowerPolicyNotify");
+			pSPR = (PFN_SPR)GetProcAddressW(h, L"SetPowerRequirement");
+			pRPR = (PFN_RPR)GetProcAddressW(h, L"ReleasePowerRequirement");
+			th = CreateThread(NULL, 0x4000, power_watch, h, 0, NULL);
+			if (th) CloseHandle(th);
+		}
+	}
+	if (on && !g_unatt) {
+		if (pPPN) pPPN(0x0003 /* PPN_UNATTENDEDMODE */, TRUE);
+		if (pSPR && !g_pwreq) g_pwreq = pSPR((PVOID)L"wav1:", 0 /* D0 */, 0x1 | 0x1000 /* POWER_NAME|POWER_FORCE */, NULL, 0);
+		g_unatt = 1;
+	} else if (!on && g_unatt) {
+		if (pPPN) pPPN(0x0003, FALSE);
+		if (pRPR && g_pwreq) pRPR(g_pwreq);
+		g_pwreq = NULL;
+		g_unatt = 0;
+	}
+}
+#else
+static void power_keep(int on) { (void)on; }
+#endif
+
 static DWORD WINAPI video_thread(LPVOID arg)
 {
 	Player *p = (Player *)arg;
@@ -1252,6 +1335,26 @@ static DWORD WINAPI video_thread(LPVOID arg)
 
 	while (!p->quit) {
 		int r;
+		if (p->bg && p->seek_gen == gen && gen >= 0) {
+			/* screen off: stop downloading/decoding video, catch up when it comes back */
+			int was = 0;
+			while (p->bg && !p->quit && p->seek_gen == gen) { was = 1; Sleep(150); }
+			if (was && !p->quit && p->seek_gen == gen && !p->veof) {
+				long target = clock_ms(p);
+				tube_log("video: screen back on, resync to %ld", target);
+				p->vs.intr = 0;
+				drop_before = target;
+				keyskip = 0;
+				cc->skip_frame = AVDISCARD_DEFAULT;
+				if (av_seek_frame(fc, vidx, av_rescale_q(target, (AVRational){1, 1000}, tb), AVSEEK_FLAG_BACKWARD) < 0)
+					tube_log("video resync seek failed");
+				fc->pb->error = 0;
+				fc->pb->eof_reached = 0;
+				avcodec_flush_buffers(cc);
+				p->need_clear = 1;
+			}
+			continue;
+		}
 		if (p->seek_gen != gen) {
 			long target;
 			gen = p->seek_gen;
@@ -1516,6 +1619,7 @@ void player_close(Player *p)
 {
 	int ok = 1;
 	if (!p) return;
+	power_keep(0);
 	p->quit = 1;
 	p->vs.quit = p->as.quit = 1;
 	if (p->vs.ring) SetEvent(p->vs.ev_data);
@@ -1696,7 +1800,21 @@ void player_key(Player *p, int vk)
 void player_tick(Player *p)
 {
 	DWORD now = GetTickCount();
-	int starving;
+	int starving, playing = !p->paused && (p->state == PS_PLAYING || p->state == PS_BUFFERING || p->state == PS_LOADING);
+	/* keep the sound going with the screen off (power button) while playing */
+	power_keep(playing && p->has_audio && !p->audio_dead);
+	{
+		int bg = g_screen_off && playing && p->has_audio && !p->audio_dead;
+		if (bg != p->bg) { p->bg = bg; if (!bg) p->need_clear = 1; }
+	}
+	/* while watching, don't let the screen time out */
+	if (playing && !g_screen_off && now - p->idle_tick > 10000) {
+		p->idle_tick = now;
+#ifdef _WIN32_WCE
+		SystemIdleTimerReset();
+#endif
+	}
+	if (p->bg) return;
 	if (now - p->ftick >= 1000) {
 		p->fps = p->fcount * 1000 / (int)(now - p->ftick);
 		p->fcount = 0;
