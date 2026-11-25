@@ -10,3 +10,6 @@ M480Music/res.o
 *.mpq
 M480Comic/build/
 M480Comic/out/
+M480Call/M480Call.exe
+M480Call/res.o
+M480Call/out/
