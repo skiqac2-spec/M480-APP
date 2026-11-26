@@ -8,6 +8,8 @@
  *  - 배경화면: 기본 색 배경 9가지 또는 내 사진(JPG/PNG/BMP), 어둡게 조절
  *  - 아이콘 자리: 꾹 누른 채 끌어서 아무 칸에나 (빈칸 허용, 화면 끝에 대면 페이지 넘김)
  *  - 홈 맨 위 Wi-Fi·블루투스 단추: 누르면 켜기/끄기·설정 열기 메뉴, 꾹 누르면 설정 바로 열기
+ *  - 아이콘 블럭·Wi-Fi/블루투스 단추 반투명 (설정에서 정도 조절)
+ *  - 앱마다 블럭 색·아이콘(내장 그림 18가지) 바꾸기, 아이콘 없는 앱은 내장 그림 자동
  *  - 오늘(Today) 화면이 앞으로 나오면 자동으로 M480Home을 대신 보여 줌 (설정에서 끌 수 있음)
  *
  * 키: 방향키 이동, 가운데(확인) 실행, 왼쪽 소프트키 전체 앱, 오른쪽 소프트키 실행 중, 뒤로 = 홈
@@ -33,7 +35,7 @@
 
 #define APP_CLASS L"M480HomeWnd"
 #define APP_TITLE L"M480 홈"
-#define APP_VER   L"1.4.1"
+#define APP_VER   L"1.5"
 
 #ifndef VK_OFF
 #define VK_OFF 0xDF
@@ -83,6 +85,8 @@ typedef struct {
     HICON icon;
     int iconTried;
     int pos;                  /* 홈 칸 번호 (페이지*칸수 + 칸) */
+    int color;                /* 0 자동, k: BLOCK[k-1] */
+    int glyph;                /* 0 자동, -1 원래 아이콘, k: 내장 그림 k */
 } App;
 
 #define MAX_FAV 60
@@ -106,12 +110,14 @@ static struct {
     int wallDim;        /* 0 그대로, 1 조금, 2 많이 어둡게 */
     wchar_t wallPath[MAX_PATH];
     int addPos;         /* '앱 추가' 칸 자리 (-1: 첫 빈칸) */
-} g_set = { 1, 0, 1, 1, 1, L"", -1 };
+    int opacity;        /* 0 불투명 .. 4 거의 투명 */
+} g_set = { 1, 0, 1, 1, 1, L"", -1, 2 };
 #define LIFT_ADD 999        /* g_lift 값: '앱 추가' 칸을 들어 올림 */
 #define WALL_PHOTO 100
 
 /* 화면 */
-enum { SCR_HOME, SCR_ALL, SCR_RUN, SCR_SET, SCR_WALL, SCR_N };
+enum { SCR_HOME, SCR_ALL, SCR_RUN, SCR_SET, SCR_WALL, SCR_EDIT, SCR_N };
+static int g_editIdx = -1;   /* 색·아이콘 바꾸는 앱 (-1: 모든 앱 색) */
 static int g_scr = SCR_HOME;
 static int g_page;
 static int g_scroll[SCR_N], g_contentH[SCR_N];
@@ -132,7 +138,7 @@ static void grid_dims(int *cols, int *rows);
 
 /* 눌림 영역 */
 enum {
-    H_NONE, H_TILE, H_EMPTY, H_ADDTILE, H_QWIFI, H_QBT, H_WDIM, H_WPRESET, H_WPIC, H_NAV_ALL, H_NAV_RUN, H_NAV_SET, H_BACK, H_ROW, H_CLOSE, H_CLOSEALL,
+    H_NONE, H_TILE, H_EMPTY, H_ADDTILE, H_ECOLOR, H_EGLYPH, H_EALL, H_EAUTOALL, H_QWIFI, H_QBT, H_WDIM, H_WPRESET, H_WPIC, H_NAV_ALL, H_NAV_RUN, H_NAV_SET, H_BACK, H_ROW, H_CLOSE, H_CLOSEALL,
     H_VOLDN, H_VOLUP, H_OFF, H_OPT, H_MENU, H_MENU_BG, H_DOT, H_DONE
 };
 typedef struct { RECT r; int id, arg; } Hit;
@@ -141,7 +147,7 @@ static Hit g_hit[MAX_HIT];
 static int g_hitN;
 
 /* 꾹 누르면 나오는 메뉴 */
-enum { M_FAV_REMOVE = 1, M_ALL_ADD, M_ALL_REMOVE, M_RUN_CLOSE, M_WIFI_TOGGLE, M_WIFI_SET, M_BT_TOGGLE, M_BT_SET, M_CANCEL };
+enum { M_FAV_REMOVE = 1, M_FAV_EDIT, M_ALL_ADD, M_ALL_REMOVE, M_RUN_CLOSE, M_WIFI_TOGGLE, M_WIFI_SET, M_BT_TOGGLE, M_BT_SET, M_CANCEL };
 static struct {
     int on, target;
     wchar_t title[64];
@@ -157,6 +163,7 @@ static DWORD g_lastLaunch;
 
 /* 상태 */
 static int g_batt = -1, g_charging, g_net;
+static DWORD g_battLife = 0xFFFFFFFF;   /* 남은 시간 (초), 모르면 0xFFFFFFFF */
 static int g_vol = -1;          /* 0..10 */
 static int g_lastMin = -1;
 
@@ -624,10 +631,10 @@ static void save_settings(void)
     for (i = -1; i < g_favN; i++) {
         if (i < 0)
             _snwprintf(line, sizeof(line) / sizeof(wchar_t),
-                       L"today=%d\r\ngrid=%d\r\nclock24=%d\r\nwall=%d\r\nwalldim=%d\r\nwallpath=%s\r\naddpos=%d\r\nfavinit=2\r\n",
-                       g_set.replaceToday, g_set.grid, g_set.clock24, g_set.wallType, g_set.wallDim, g_set.wallPath, g_set.addPos);
+                       L"today=%d\r\ngrid=%d\r\nclock24=%d\r\nwall=%d\r\nwalldim=%d\r\nwallpath=%s\r\naddpos=%d\r\nopacity=%d\r\nfavinit=2\r\n",
+                       g_set.replaceToday, g_set.grid, g_set.clock24, g_set.wallType, g_set.wallDim, g_set.wallPath, g_set.addPos, g_set.opacity);
         else
-            _snwprintf(line, sizeof(line) / sizeof(wchar_t), L"fav=%d\t%s\t%s\t%s\r\n", g_fav[i].pos, g_fav[i].path, g_fav[i].key, g_fav[i].name);
+            _snwprintf(line, sizeof(line) / sizeof(wchar_t), L"fav=%d\t%s\t%s\t%s\t%d\t%d\r\n", g_fav[i].pos, g_fav[i].path, g_fav[i].key, g_fav[i].name, g_fav[i].color, g_fav[i].glyph);
         n = WideCharToMultiByte(CP_UTF8, 0, line, -1, u8, sizeof(u8), NULL, NULL);
         if (n > 1) WriteFile(f, u8, n - 1, &wr, NULL);
     }
@@ -662,6 +669,7 @@ static int load_settings(void)
         if (!wcsncmp(line, L"today=", 6)) g_set.replaceToday = (int)wcstol(line + 6, NULL, 10);
         else if (!wcsncmp(line, L"grid=", 5)) g_set.grid = (int)wcstol(line + 5, NULL, 10) % 3;
         else if (!wcsncmp(line, L"clock24=", 8)) g_set.clock24 = (int)wcstol(line + 8, NULL, 10);
+        else if (!wcsncmp(line, L"opacity=", 8)) g_set.opacity = (int)wcstol(line + 8, NULL, 10) % 5;
         else if (!wcsncmp(line, L"addpos=", 7)) g_set.addPos = (int)wcstol(line + 7, NULL, 10);
         else if (!wcsncmp(line, L"wall=", 5)) g_set.wallType = (int)wcstol(line + 5, NULL, 10);
         else if (!wcsncmp(line, L"walldim=", 8)) g_set.wallDim = (int)wcstol(line + 8, NULL, 10) % 3;
@@ -669,10 +677,10 @@ static int load_settings(void)
         else if (!wcsncmp(line, L"favinit=", 8)) inited = 1;
         else if (!wcsncmp(line, L"fav=", 4) && g_favN < MAX_FAV) {
             /* 1.1: fav=칸<TAB>경로<TAB>키<TAB>이름   1.0: fav=경로<TAB>키<TAB>이름 */
-            wchar_t *f[4], *q = line + 4;
+            wchar_t *f[6], *q = line + 4;
             int nf = 0;
             App *ap;
-            while (nf < 4) {
+            while (nf < 6) {
                 f[nf++] = q;
                 q = wcschr(q, L'\t');
                 if (!q) break;
@@ -681,7 +689,11 @@ static int load_settings(void)
             if (nf < 3) continue;
             ap = &g_fav[g_favN];
             memset(ap, 0, sizeof(*ap));
-            if (nf == 4) {
+            if (nf == 6) {
+                ap->color = (int)wcstol(f[4], NULL, 10);
+                ap->glyph = (int)wcstol(f[5], NULL, 10);
+            }
+            if (nf >= 4) {
                 ap->pos = (int)wcstol(f[0], NULL, 10);
                 f[0] = f[1]; f[1] = f[2]; f[2] = f[3];
             } else ap->pos = g_favN;
@@ -834,10 +846,12 @@ static void read_status(void)
         if (pPowerEx(&ps, FALSE)) {
             if (ps.BatteryLifePercent <= 100) g_batt = ps.BatteryLifePercent;
             g_charging = ps.ACLineStatus == 1;
+            g_battLife = ps.BatteryLifeTime;
         }
     }
 #ifdef PREVIEW_W
     g_batt = 76;
+    g_battLife = 3 * 3600 + 20 * 60;
 #endif
     g_net = 0;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"System\\State\\Connections\\Network", 0, 0, &k) == ERROR_SUCCESS) {
@@ -1095,6 +1109,7 @@ static void quiet_nudge(void)
 /* ------------------------------------------------------------------ */
 /* 그리기 도우미                                                         */
 /* ------------------------------------------------------------------ */
+#define DIBROW(bits, w, h, y) ((bits) + (size_t)((h) - 1 - (y)) * (w))
 static HDC g_dc;
 static HBITMAP g_wall;
 static int g_shadow;
@@ -1196,22 +1211,6 @@ static int text(HFONT f, COLORREF c, int x, int y, int w, int h, const wchar_t *
 }
 
 /* 앱 그림: 아이콘이 있으면 색 사각형 위에, 없으면 첫 글자 */
-static void draw_app_badge(App *a, int x, int y, int sz)
-{
-    HICON ic = app_icon(a);
-    COLORREF c = PAL[hash_str(a->name) % (sizeof(PAL) / sizeof(PAL[0]))];
-    rrect(x, y, sz, sz, sz / 4, c);
-    if (ic) {
-        int is = sz >= S(40) ? S(32) : sz - S(6);
-        if (is > S(32)) is = S(32);
-        DrawIconEx(g_dc, x + (sz - is) / 2, y + (sz - is) / 2, ic, is, is, 0, NULL, DI_NORMAL);
-    } else {
-        wchar_t l[2];
-        l[0] = a->name[0]; l[1] = 0;
-        text(sz >= S(44) ? fLetterB : fLetter, C_TEXT, x, y, sz, sz, l, 1);
-    }
-}
-
 /* 간단한 그림 글자들 */
 static void glyph_grid(int cx, int cy, COLORREF c)
 {
@@ -1282,6 +1281,269 @@ static void glyph_speaker(int cx, int cy, COLORREF c)
 /* ------------------------------------------------------------------ */
 /* 화면 그리기                                                           */
 /* ------------------------------------------------------------------ */
+/* 블럭 색 */
+static const struct { const wchar_t *name; COLORREF c; } BLOCK[] = {
+    { L"빨강", RGB(220, 60, 70) }, { L"주황", RGB(240, 128, 50) }, { L"노랑", RGB(232, 190, 40) },
+    { L"연두", RGB(130, 190, 60) }, { L"초록", RGB(50, 160, 100) }, { L"청록", RGB(30, 160, 170) },
+    { L"하늘", RGB(70, 160, 230) }, { L"파랑", RGB(50, 100, 220) }, { L"남색", RGB(50, 50, 140) },
+    { L"보라", RGB(140, 80, 210) }, { L"분홍", RGB(225, 95, 160) }, { L"갈색", RGB(140, 90, 60) },
+    { L"회색", RGB(110, 114, 124) }, { L"검정", RGB(20, 20, 24) }, { L"흰색", RGB(240, 240, 244) },
+};
+#define N_BLOCK ((int)(sizeof(BLOCK) / sizeof(BLOCK[0])))
+static const int OPA[5] = { 255, 205, 155, 110, 70 };
+static const wchar_t *OPA_NAME[5] = { L"불투명", L"조금 투명", L"반투명", L"많이 투명", L"거의 투명" };
+
+/* 내장 아이콘 그림 */
+enum { G_NONE, G_GLOBE, G_VIDEO, G_MUSIC, G_BOOK, G_PAD, G_FPHONE, G_CALL, G_SWORD, G_FOLDER, G_GEAR,
+       G_CALC, G_CAL, G_MAIL, G_PHOTO, G_BATT, G_STAR, G_HOUSE, G_MEMO, G_N };
+static const wchar_t *GLYPH_NAME[G_N] = { L"", L"지구", L"동영상", L"음악", L"책", L"게임", L"피처폰", L"전화",
+    L"칼", L"폴더", L"톱니", L"계산기", L"달력", L"편지", L"사진", L"배터리", L"별", L"집", L"메모" };
+static const struct { const wchar_t *exe; int g; } KNOWN_GLYPH[] = {
+    { L"m480web.exe", G_GLOBE }, { L"m480tube.exe", G_VIDEO }, { L"m480music.exe", G_MUSIC },
+    { L"m480comic.exe", G_BOOK }, { L"emulator.exe", G_PAD }, { L"m480wipi.exe", G_FPHONE },
+    { L"m480call.exe", G_CALL }, { L"abyss_wm61.exe", G_SWORD }, { L"d2m480.exe", G_SWORD },
+    { L"fexplore.exe", G_FOLDER }, { L"ctlpnl.exe", G_GEAR }, { L"calc.exe", G_CALC },
+    { L"calendar.exe", G_CAL }, { L"tmail.exe", G_MAIL }, { L"pimg.exe", G_PHOTO },
+    { L"m480batt.exe", G_BATT }, { L"notes.exe", G_MEMO }, { L"wmplayer.exe", G_MUSIC },
+    { L"iexplore.exe", G_GLOBE }, { NULL, 0 }
+};
+/* 자기 아이콘이 없는 앱 (기본 흰 문서 그림이 나옴) */
+static const wchar_t *NOICON[] = { L"emulator.exe", L"abyss_wm61.exe", L"d2m480.exe", L"ctlpnl.exe", NULL };
+static const short GEAR_PTS[][2] = { {90,46}, {96,15}, {144,15}, {150,46}, {151,46}, {177,28}, {212,63}, {194,89}, {194,90}, {225,96}, {225,144}, {194,150}, {194,151}, {212,177}, {177,212}, {151,194}, {150,194}, {144,225}, {96,225}, {90,194}, {89,194}, {63,212}, {28,177}, {46,151}, {46,150}, {15,144}, {15,96}, {46,90}, {46,89}, {28,63}, {63,28}, {89,46} };
+static const short STAR_PTS[][2] = { {120,23}, {147,98}, {227,100}, {164,149}, {186,226}, {120,181}, {54,226}, {76,149}, {13,100}, {93,98} };
+
+static DWORD *g_bits;      /* 그리는 중인 화면 DIB (반투명용) */
+
+/* 둥근 사각형을 반투명하게 칠함 (DIB에 직접) */
+static void ablend(int x, int y, int w, int h, int rad, COLORREF c, int a)
+{
+    int yy, xx, x0, x1, y0, y1;
+    unsigned cr = GetRValue(c), cg = GetGValue(c), cb = GetBValue(c), ia;
+    if (a >= 255 || !g_bits) { rrect(x, y, w, h, rad, c); return; }
+    if (a <= 0) return;
+    ia = 256 - a;
+    y0 = y < 0 ? 0 : y; y1 = y + h > H ? H : y + h;
+    x0 = x < 0 ? 0 : x; x1 = x + w > W ? W : x + w;
+    for (yy = y0; yy < y1; yy++) {
+        DWORD *row = DIBROW(g_bits, W, H, yy);
+        int dy = yy < y + rad ? y + rad - yy : (yy >= y + h - rad ? yy - (y + h - rad - 1) : 0);
+        for (xx = x0; xx < x1; xx++) {
+            int dx = xx < x + rad ? x + rad - xx : (xx >= x + w - rad ? xx - (x + w - rad - 1) : 0);
+            DWORD v;
+            if (dx && dy && dx * dx + dy * dy > rad * rad) continue;
+            v = row[xx];
+            row[xx] = (((((v >> 16) & 255) * ia + cr * a) >> 8) << 16) |
+                      (((((v >> 8) & 255) * ia + cg * a) >> 8) << 8) |
+                      ((((v & 255) * ia + cb * a) >> 8));
+        }
+    }
+}
+
+static int known_glyph(const wchar_t *key)
+{
+    const wchar_t *b = base_name(key);
+    int i;
+    for (i = 0; KNOWN_GLYPH[i].exe; i++) if (_wcsicmp(b, KNOWN_GLYPH[i].exe) == 0) return KNOWN_GLYPH[i].g;
+    return 0;
+}
+static int no_icon(const wchar_t *key)
+{
+    const wchar_t *b = base_name(key);
+    int i;
+    for (i = 0; NOICON[i]; i++) if (_wcsicmp(b, NOICON[i]) == 0) return 1;
+    return 0;
+}
+/* 그릴 내장 그림 번호 (0이면 원래 아이콘 또는 첫 글자) */
+static int app_glyph(App *a)
+{
+    int g;
+    if (a->glyph > 0 && a->glyph < G_N) return a->glyph;
+    if (a->glyph < 0) return 0;
+    g = known_glyph(a->key);
+    if (!g) return 0;
+    if (no_icon(a->key) || !app_icon(a)) return g;
+    return 0;
+}
+static COLORREF block_color(App *a)
+{
+    if (a->color > 0 && a->color <= N_BLOCK) return BLOCK[a->color - 1].c;
+    return PAL[hash_str(a->name) % (sizeof(PAL) / sizeof(PAL[0]))];
+}
+static int is_light(COLORREF c) { return GetRValue(c) * 3 + GetGValue(c) * 6 + GetBValue(c) > 1700; }
+
+/* 그림 도우미 (240 칸 좌표) */
+static int gx0, gy0, gsz;
+#define GX(v) (gx0 + gsz * (v) / 240)
+#define GY(v) (gy0 + gsz * (v) / 240)
+static void g_fill(int x0, int y0, int x1, int y1, COLORREF c) { fill(GX(x0), GY(y0), GX(x1) - GX(x0), GY(y1) - GY(y0), c); }
+static void g_frame(int x0, int y0, int x1, int y1, int r, int th, COLORREF c) { frame(GX(x0), GY(y0), GX(x1) - GX(x0), GY(y1) - GY(y0), gsz * r / 240, th, c); }
+static void g_poly(const short (*pt)[2], int n, COLORREF c)
+{
+    POINT p[40];
+    int i;
+    for (i = 0; i < n && i < 40; i++) { p[i].x = GX(pt[i][0]); p[i].y = GY(pt[i][1]); }
+    poly(p, n, c);
+}
+static void g_line(const short (*pt)[2], int n, int th, COLORREF c)
+{
+    POINT p[40];
+    int i;
+    HPEN pen = CreatePen(PS_SOLID, th, c), op = (HPEN)SelectObject(g_dc, pen);
+    for (i = 0; i < n && i < 40; i++) { p[i].x = GX(pt[i][0]); p[i].y = GY(pt[i][1]); }
+    Polyline(g_dc, p, n);
+    SelectObject(g_dc, op);
+    DeleteObject(pen);
+}
+static void g_ring(int cx, int cy, int rx, int ry, int th, COLORREF c)
+{
+    HPEN pen = CreatePen(PS_SOLID, th, c), op = (HPEN)SelectObject(g_dc, pen);
+    HBRUSH ob = (HBRUSH)SelectObject(g_dc, GetStockObject(NULL_BRUSH));
+    Ellipse(g_dc, GX(cx - rx), GY(cy - ry), GX(cx + rx), GY(cy + ry));
+    SelectObject(g_dc, ob);
+    SelectObject(g_dc, op);
+    DeleteObject(pen);
+}
+static void g_dot(int cx, int cy, int r, COLORREF c) { circle(GX(cx), GY(cy), gsz * r / 240 > 0 ? gsz * r / 240 : 1, c); }
+
+static void draw_glyph(int g, int x, int y, int sz, COLORREF c)
+{
+    int th;
+    gsz = sz * 68 / 100;
+    gx0 = x + (sz - gsz) / 2;
+    gy0 = y + (sz - gsz) / 2;
+    th = gsz / 14;
+    if (th < 1) th = 1;
+    switch (g) {
+    case G_GLOBE: {
+        static const short l1[][2] = { {30,120},{210,120} }, l2[][2] = { {48,72},{192,72} }, l3[][2] = { {48,168},{192,168} };
+        g_ring(120, 120, 90, 90, th, c); g_ring(120, 120, 40, 90, th, c);
+        g_line(l1, 2, th, c); g_line(l2, 2, th, c); g_line(l3, 2, th, c);
+        break;
+    }
+    case G_VIDEO: {
+        static const short t[][2] = { {98,82},{165,120},{98,158} };
+        g_frame(18, 45, 222, 195, 30, th + 1, c); g_poly(t, 3, c);
+        break;
+    }
+    case G_MUSIC: {
+        static const short f[][2] = { {102,35},{190,62},{190,105},{120,82} };
+        g_dot(78, 178, 34, c); g_fill(102, 35, 120, 180, c); g_poly(f, 4, c);
+        break;
+    }
+    case G_BOOK: {
+        static const short a[][2] = { {22,52},{112,68},{112,202},{22,186} }, b[][2] = { {128,68},{218,52},{218,186},{128,202} };
+        g_poly(a, 4, c); g_poly(b, 4, c);
+        break;
+    }
+    case G_PAD:
+        g_frame(12, 62, 228, 190, 60, th + 1, c);
+        g_fill(50, 116, 110, 136, c); g_fill(70, 96, 90, 156, c);
+        g_dot(160, 110, 16, c); g_dot(188, 142, 16, c);
+        break;
+    case G_FPHONE: {
+        int i, j;
+        g_frame(62, 10, 178, 230, 24, th + 1, c);
+        g_frame(84, 32, 156, 100, 6, th, c);
+        for (i = 0; i < 3; i++) for (j = 0; j < 3; j++) g_dot(96 + i * 24, 130 + j * 30, 9, c);
+        break;
+    }
+    case G_CALL: {
+        static const short h[][2] = { {48,22},{96,22},{112,74},{86,100},{140,154},{166,128},{218,144},{218,194},
+                                      {188,220},{150,220},{22,92},{22,52} };
+        g_poly(h, 12, c);
+        break;
+    }
+    case G_SWORD: {
+        static const short b[][2] = { {178,18},{222,18},{222,62},{96,170},{70,144} };
+        static const short gd[][2] = { {42,140},{64,118},{122,176},{100,198} };
+        static const short hd[][2] = { {66,174},{34,206} };
+        g_poly(b, 5, c); g_poly(gd, 4, c); g_line(hd, 2, th + 2, c); g_dot(28, 212, 16, c);
+        break;
+    }
+    case G_FOLDER: {
+        static const short f[][2] = { {18,52},{92,52},{114,78},{222,78},{222,196},{18,196} };
+        g_poly(f, 6, c);
+        break;
+    }
+    case G_GEAR: {
+        static const short z[][2] = { {0,0} };
+        (void)z;
+        g_line(GEAR_PTS, 32, th + 1, c);
+        {
+            short e[2][2];
+            e[0][0] = GEAR_PTS[31][0]; e[0][1] = GEAR_PTS[31][1];
+            e[1][0] = GEAR_PTS[0][0]; e[1][1] = GEAR_PTS[0][1];
+            g_line((const short (*)[2])e, 2, th + 1, c);
+        }
+        g_ring(120, 120, 34, 34, th + 1, c);
+        break;
+    }
+    case G_CALC: {
+        int i, j;
+        g_frame(52, 12, 188, 228, 20, th + 1, c);
+        g_fill(74, 34, 166, 82, c);
+        for (i = 0; i < 3; i++) for (j = 0; j < 3; j++) g_fill(74 + i * 33, 102 + j * 38, 100 + i * 33, 128 + j * 38, c);
+        break;
+    }
+    case G_CAL: {
+        int i, j;
+        g_frame(22, 38, 218, 212, 18, th + 1, c);
+        g_fill(22, 38, 218, 84, c);
+        g_fill(62, 16, 80, 58, c); g_fill(160, 16, 178, 58, c);
+        for (i = 0; i < 4; i++) for (j = 0; j < 2; j++) g_fill(48 + i * 40, 108 + j * 46, 72 + i * 40, 130 + j * 46, c);
+        break;
+    }
+    case G_MAIL: {
+        static const short v[][2] = { {20,56},{120,134},{220,56} };
+        g_frame(18, 48, 222, 192, 14, th + 1, c); g_line(v, 3, th + 1, c);
+        break;
+    }
+    case G_PHOTO: {
+        static const short m[][2] = { {38,182},{98,100},{148,166},{170,140},{204,182} };
+        g_frame(18, 38, 222, 202, 14, th + 1, c); g_poly(m, 5, c); g_dot(166, 84, 20, c);
+        break;
+    }
+    case G_BATT:
+        g_frame(16, 66, 198, 174, 16, th + 1, c); g_fill(198, 98, 224, 142, c); g_fill(40, 90, 140, 150, c);
+        break;
+    case G_STAR:
+        g_poly(STAR_PTS, 10, c);
+        break;
+    case G_HOUSE: {
+        static const short h[][2] = { {16,122},{120,28},{224,122},{188,122},{188,212},{52,212},{52,122} };
+        g_poly(h, 7, c);
+        break;
+    }
+    case G_MEMO:
+        g_frame(44, 16, 196, 224, 14, th + 1, c);
+        g_fill(74, 64, 166, 78, c); g_fill(74, 106, 166, 120, c); g_fill(74, 148, 140, 162, c);
+        break;
+    }
+}
+
+/* 앱 그림: 블럭(반투명) + 내장 그림 / 원래 아이콘 / 첫 글자 */
+static void draw_app_badge_a(App *a, int x, int y, int sz, int alpha)
+{
+    COLORREF c = block_color(a), fg = is_light(c) ? RGB(28, 28, 32) : C_TEXT;
+    int g = app_glyph(a);
+    HICON ic = g ? NULL : app_icon(a);
+    ablend(x, y, sz, sz, sz / 4, c, alpha);
+    if (g) draw_glyph(g, x, y, sz, fg);
+    else if (ic) {
+        int is = sz >= S(40) ? S(32) : sz - S(6);
+        if (is > S(32)) is = S(32);
+        DrawIconEx(g_dc, x + (sz - is) / 2, y + (sz - is) / 2, ic, is, is, 0, NULL, DI_NORMAL);
+    } else {
+        wchar_t l[2];
+        int sh = g_shadow;
+        l[0] = a->name[0]; l[1] = 0;
+        g_shadow = 0;
+        text(sz >= S(44) ? fLetterB : fLetter, fg, x, y, sz, sz, l, 1);
+        g_shadow = sh;
+    }
+}
+static void draw_app_badge(App *a, int x, int y, int sz) { draw_app_badge_a(a, x, y, sz, 255); }
+
 #define NAV_H  S(44)
 #define HEAD_H S(50)
 
@@ -1324,57 +1586,61 @@ static void quick_button(int x, int y, int w, int h, int id, int which)
 {
     int st = which == 0 ? g_wifi : g_bt;
     const wchar_t *lab = st < 0 ? L"없음" : !st ? L"꺼짐" : (which == 0 && !g_net) ? L"켜짐" : (which == 0 ? L"연결됨" : L"켜짐");
-    COLORREF bg = pressed(id, 0) ? C_PRESS : st == 1 ? (which == 0 ? RGB(40, 120, 220) : RGB(40, 110, 230)) : C_CARD;
-    COLORREF fg = st == 1 ? C_TEXT : C_SUB;
-    rrect(x, y, w, h, S(9), bg);
+    COLORREF bg = st == 1 ? (which == 0 ? RGB(40, 120, 220) : RGB(40, 110, 230)) : RGB(60, 62, 70);
+    COLORREF fg = st == 1 ? C_TEXT : RGB(200, 200, 206);
+    int al = OPA[g_set.opacity % 5];
+    if (pressed(id, 0)) { bg = C_PRESS; al = al < 200 ? al + 55 : 255; }
+    ablend(x, y, w, h, S(9), bg, al);
     if (which == 0) glyph_wifi(x + w / 2, y + S(12), fg);
     else glyph_bt(x + w / 2, y + S(13), fg);
     if (which == 0 && st == 1 && g_net) circle(x + w - S(7), y + S(7), S(3), C_OK);
     {
         int sh = g_shadow;
-        g_shadow = 0;
+        g_shadow = g_wall != NULL && g_set.opacity >= 2;
         text(fSmall, fg, x, y + h - S(18), w, S(16), lab, 1);
         g_shadow = sh;
     }
     hit_add(x, y, w, h, id, 0);
 }
 
+/* 머리: 날짜(크게) + 배터리 막대·백분율·상태 + Wi-Fi·블루투스 (시계는 위 작업 표시줄에 있으니 뺌) */
 static void paint_header(void)
 {
     SYSTEMTIME st;
-    wchar_t clk[16], ap[8], d1[24], d2[24];
-    static const wchar_t *wd[7] = { L"일", L"월", L"화", L"수", L"목", L"금", L"토" };
-    int cw, x, bx, by, bw, bh, lv, qw = S(46), qh = S(42), qx;
+    wchar_t d1[32], d2[48], d3[48];
+    static const wchar_t *wd[7] = { L"일요일", L"월요일", L"화요일", L"수요일", L"목요일", L"금요일", L"토요일" };
+    int x = S(12), bx, by, bw, bh, lv, qw = S(46), qh = S(42), qx;
     COLORREF bc;
     GetLocalTime(&st);
-    ap[0] = 0;
     g_shadow = g_wall != NULL;
-    if (g_set.clock24) _snwprintf(clk, 16, L"%02d:%02d", st.wHour, st.wMinute);
-    else {
-        int h12 = st.wHour % 12;
-        if (h12 == 0) h12 = 12;
-        _snwprintf(clk, 16, L"%d:%02d", h12, st.wMinute);
-        wcscpy(ap, st.wHour < 12 ? L"오전" : L"오후");
-    }
-    _snwprintf(d1, 24, L"%d월 %d일 %s", st.wMonth, st.wDay, wd[st.wDayOfWeek % 7]);
-    x = S(10);
-    if (ap[0]) { text(fBold, C_SUB, x, S(8), S(30), HEAD_H - S(16), ap, 0); x += S(30); }
-    cw = text(fClock, C_TEXT, x, S(4), S(120), HEAD_H - S(8), clk, 0);
-    x += cw + S(8);
     qx = W - S(6) - qw * 2 - S(5);
-    text(fBold, C_TEXT, x, S(8), qx - x - S(4), S(18), d1, 0);
+    _snwprintf(d1, 32, L"%d월 %d일 %s", st.wMonth, st.wDay, wd[st.wDayOfWeek % 7]);
+    text(fHead, C_TEXT, x, S(3), qx - x - S(4), S(22), d1, 0);
 
-    /* 배터리 (날짜 아래) */
-    bw = S(22); bh = S(11);
-    bx = x; by = S(30);
+    /* 배터리 막대 */
+    bw = S(54); bh = S(14);
+    bx = x; by = S(28);
     lv = g_batt < 0 ? 0 : g_batt;
-    bc = g_charging ? C_OK : lv <= 15 ? C_BAD : lv <= 30 ? C_WARN : C_TEXT;
-    frame(bx, by, bw, bh, S(2), 1, C_SUB);
-    fill(bx + bw, by + S(3), S(2), bh - S(6), C_SUB);
+    bc = g_charging ? C_OK : lv <= 15 ? C_BAD : lv <= 30 ? C_WARN : C_OK;
+    ablend(bx, by, bw, bh, S(3), RGB(0, 0, 0), g_wall ? 120 : 0);
+    frame(bx, by, bw, bh, S(3), 1, RGB(200, 200, 206));
+    fill(bx + bw, by + S(4), S(3), bh - S(8), RGB(200, 200, 206));
     if (g_batt >= 0) fill(bx + S(2), by + S(2), (bw - S(4)) * lv / 100, bh - S(4), bc);
-    if (g_batt >= 0) _snwprintf(d2, 24, g_charging ? L"충전 %d%%" : L"%d%%", g_batt);
-    else wcscpy(d2, L"--");
-    text(fSmall, bc, bx + bw + S(6), by - S(3), qx - bx - bw - S(8), bh + S(6), d2, 0);
+    if (g_batt >= 0) _snwprintf(d2, 48, L"%d%%", g_batt);
+    else wcscpy(d2, L"--%");
+    {
+        int tw = text(fBold, C_TEXT, bx + bw + S(7), by - S(3), S(44), bh + S(6), d2, 0);
+        if (g_batt < 0) wcscpy(d3, L"");
+        else if (g_charging && g_batt >= 100) wcscpy(d3, L"완전 충전");
+        else if (g_charging) wcscpy(d3, L"충전 중");
+        else if (g_battLife != 0xFFFFFFFF && g_battLife > 0 && g_battLife < 100 * 3600) {
+            DWORD m = g_battLife / 60;
+            if (m >= 60) _snwprintf(d3, 48, L"약 %lu시간 %lu분", (unsigned long)(m / 60), (unsigned long)(m % 60));
+            else _snwprintf(d3, 48, L"약 %lu분 남음", (unsigned long)m);
+        } else wcscpy(d3, lv <= 15 ? L"충전 필요" : lv <= 30 ? L"부족" : L"사용 중");
+        text(fSmall, g_charging ? C_OK : lv <= 15 && g_batt >= 0 ? C_BAD : RGB(210, 210, 216),
+             bx + bw + S(10) + tw, by - S(3), qx - (bx + bw + S(10) + tw) - S(4), bh + S(6), d3, 0);
+    }
     g_shadow = 0;
 
     /* Wi-Fi · 블루투스 단추 */
@@ -1393,7 +1659,7 @@ static void paint_nav(void)
         int x = i * bw, w = (i == 2) ? W - x : bw;
         int id = H_NAV_ALL + i;
         int cx = x + S(22), cy = y + NAV_H / 2;
-        int sel = (g_scr == SCR_ALL && i == 0) || (g_scr == SCR_RUN && i == 1) || ((g_scr == SCR_SET || g_scr == SCR_WALL) && i == 2);
+        int sel = (g_scr == SCR_ALL && i == 0) || (g_scr == SCR_RUN && i == 1) || ((g_scr == SCR_SET || g_scr == SCR_WALL || (g_scr == SCR_EDIT && g_editIdx < 0)) && i == 2);
         COLORREF fg = sel ? C_ACCENT : C_TEXT;
         if (pressed(id, 0)) rrect(x + S(3), y + S(4), w - S(6), NAV_H - S(8), S(8), C_PRESS);
         else if (sel) rrect(x + S(3), y + S(4), w - S(6), NAV_H - S(8), S(8), C_CARD);
@@ -1450,15 +1716,16 @@ static void paint_home(void)
                 frame(x + S(2), y + S(2), gw - S(4), gh - S(4), S(10), S(2), C_FOCUS);
             if (idx >= 0 && !(g_dragging && idx == g_lift)) {
                 if (pressed(H_TILE, idx) || (idx == g_lift && !g_dragging))
-                    rrect(x + S(2), y + S(2), gw - S(4), gh - S(4), S(10), C_PRESS);
-                draw_app_badge(&g_fav[idx], bx, by, badge);
+                    ablend(x + S(2), y + S(2), gw - S(4), gh - S(4), S(10), C_PRESS, 170);
+                draw_app_badge_a(&g_fav[idx], bx, by, badge, OPA[g_set.opacity % 5]);
                 tile_label(x + S(2), by + badge + S(1), gw - S(4), g_fav[idx].name, C_TEXT);
                 if (pg == g_page) hit_add(x, y, gw, gh, H_TILE, idx);
             } else if (idx < 0) {
                 int isAdd = pos == freeSlot && !(g_dragging && g_lift == LIFT_ADD);
                 if (pressed(H_ADDTILE, pos) || (isAdd && g_lift == LIFT_ADD))
-                    rrect(x + S(2), y + S(2), gw - S(4), gh - S(4), S(10), C_PRESS);
+                    ablend(x + S(2), y + S(2), gw - S(4), gh - S(4), S(10), C_PRESS, 170);
                 if (isAdd) {
+                    ablend(bx, by, badge, badge, badge / 4, RGB(60, 62, 70), OPA[g_set.opacity % 5] / 2);
                     frame(bx, by, badge, badge, badge / 4, S(2), g_wall ? C_SUB : C_DIM);
                     glyph_plus(bx + badge / 2, by + badge / 2, badge / 5, g_wall ? C_TEXT : C_SUB);
                     tile_label(x + S(2), by + badge + S(1), gw - S(4), L"앱 추가", g_wall ? C_TEXT : C_SUB);
@@ -1487,7 +1754,7 @@ static void paint_home(void)
     }
     if (g_dragging && g_lift >= 0 && g_lift < g_favN) {
         int b2 = badge + S(8), bx = g_dx - b2 / 2, by = g_dy - b2 / 2 - S(14);
-        draw_app_badge(&g_fav[g_lift], bx, by, b2);
+        draw_app_badge_a(&g_fav[g_lift], bx, by, b2, OPA[g_set.opacity % 5]);
         tile_label(bx - S(20), by + b2 + S(1), b2 + S(40), g_fav[g_lift].name, C_TEXT);
         if (g_dx < S(18) || g_dx > W - S(18)) {
             /* 화면 끝: 페이지 넘김 표시 */
@@ -1666,7 +1933,6 @@ static DWORD *new_dib(int w, int h, HBITMAP *out)
     *out = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
     return *out ? (DWORD *)bits : NULL;
 }
-#define DIBROW(bits, w, h, y) ((bits) + (size_t)((h) - 1 - (y)) * (w))
 
 /* 사진을 화면 크기로 (가운데 맞춰 꽉 채움, 상자 평균으로 줄임) */
 static int load_photo(DWORD *bits, int w, int h, const wchar_t *path, int *err)
@@ -1912,7 +2178,7 @@ static void paint_wallpick(void)
 }
 
 /* 설정 항목 */
-enum { O_VOL, O_OFF, O_WALL, O_GRID, O_TODAY, O_AUTO, O_CLOCK, O_RESET, O_RESCAN, O_QUIT, O_N };
+enum { O_VOL, O_OFF, O_WALL, O_GRID, O_ALPHA, O_BLOCK, O_TODAY, O_AUTO, O_RESET, O_RESCAN, O_QUIT, O_N };
 
 static void paint_settings(void)
 {
@@ -1951,7 +2217,8 @@ static void paint_settings(void)
             case O_GRID:  lab = L"아이콘 크기"; val = gridName[g_set.grid % 3]; break;
             case O_WALL:  lab = L"배경화면"; val = g_set.wallType == WALL_PHOTO ? base_name(g_set.wallPath) :
                                  (g_set.wallType >= 0 && g_set.wallType < N_PRESET) ? PRESET[g_set.wallType].name : L"없음"; break;
-            case O_CLOCK: lab = L"시계"; val = g_set.clock24 ? L"24시간" : L"오전/오후"; break;
+            case O_ALPHA: lab = L"아이콘·단추 투명도"; val = OPA_NAME[g_set.opacity % 5]; break;
+            case O_BLOCK: lab = L"모든 앱 블럭 색"; val = L"고르기"; break;
             case O_RESET: lab = L"홈 앱 처음 상태로"; break;
             case O_RESCAN:lab = L"앱 목록 다시 읽기"; break;
             case O_QUIT:  lab = L"M480 홈 끝내기"; break;
@@ -1977,6 +2244,91 @@ static void paint_settings(void)
     g_contentH[SCR_SET] = y - y0;
     list_clip(0);
     paint_title(L"설정", NULL);
+}
+
+/* 블럭 색·아이콘 바꾸기 화면 (g_editIdx < 0 이면 모든 앱 색) */
+static void paint_edit(void)
+{
+    App *a = (g_editIdx >= 0 && g_editIdx < g_favN) ? &g_fav[g_editIdx] : NULL;
+    int y0 = LIST_TOP - g_scroll[SCR_EDIT], y = y0, i, cols = 5, cw, ch, gap = S(6);
+    cw = (W - S(28) - gap * (cols - 1)) / cols;
+    list_clip(1);
+    /* 미리보기 */
+    if (a) {
+        int bs = S(56), px = (W - bs) / 2, py = y + S(10);
+        if (row_visible(py, bs)) {
+            if (g_wall) {
+                HDC wdc = CreateCompatibleDC(g_dc);
+                HBITMAP ow = (HBITMAP)SelectObject(wdc, g_wall);
+                BitBlt(g_dc, px - S(30), py - S(6), bs + S(60), bs + S(12), wdc, px - S(30), py - S(6), SRCCOPY);
+                SelectObject(wdc, ow);
+                DeleteDC(wdc);
+            }
+            draw_app_badge_a(a, px, py, bs, OPA[g_set.opacity % 5]);
+        }
+        y += S(76);
+    }
+    /* 블럭 색 */
+    text(fSmall, C_ACCENT, S(14), y + S(4), W, S(18), a ? L"블럭 색" : L"모든 앱 블럭 색 (누르면 바로 적용)", 0);
+    y += S(24);
+    ch = S(34);
+    for (i = 0; i <= N_BLOCK; i++) {
+        int x = S(14) + (i % cols) * (cw + gap), yy = y + (i / cols) * (ch + gap);
+        int sel = a ? a->color == i : 0;
+        if (!row_visible(yy, ch)) continue;
+        if (i == 0) {
+            int k;
+            for (k = 0; k < 4; k++) fill(x + k * cw / 4, yy, cw / 4 + 1, ch, PAL[k * 2]);
+            g_shadow = 1;
+            text(fBold, C_TEXT, x, yy, cw, ch, L"자동", 1);
+            g_shadow = 0;
+        } else {
+            rrect(x, yy, cw, ch, S(6), BLOCK[i - 1].c);
+            text(fSmall, is_light(BLOCK[i - 1].c) ? RGB(30, 30, 34) : C_TEXT, x, yy, cw, ch, BLOCK[i - 1].name, 1);
+        }
+        if (sel) frame(x - S(2), yy - S(2), cw + S(4), ch + S(4), S(7), S(3), C_ACCENT);
+        else if (pressed(H_ECOLOR, i)) frame(x - S(2), yy - S(2), cw + S(4), ch + S(4), S(7), S(3), C_TEXT);
+        hit_row(x, yy, cw, ch, H_ECOLOR, i);
+    }
+    y += ((N_BLOCK + cols) / cols) * (ch + gap) + S(4);
+    if (a) {
+        /* 이 색을 모든 앱에 */
+        if (row_visible(y, S(36))) {
+            rrect(S(14), y, W - S(28), S(36), S(8), pressed(H_EALL, 0) ? C_PRESS : C_CARD);
+            text(fBold, C_TEXT, S(14), y, W - S(28), S(36), L"이 색을 모든 앱에 적용", 1);
+            hit_row(S(14), y, W - S(28), S(36), H_EALL, 0);
+        }
+        y += S(46);
+        /* 아이콘 */
+        text(fSmall, C_ACCENT, S(14), y + S(4), W, S(18), L"아이콘", 0);
+        y += S(24);
+        ch = S(52);
+        for (i = 0; i < G_N + 1; i++) {
+            /* 0: 자동, 1: 원래 아이콘, 2..: 내장 그림 1.. */
+            int x = S(14) + (i % cols) * (cw + gap), yy = y + (i / cols) * (ch + gap);
+            int val = i == 0 ? 0 : i == 1 ? -1 : i - 1, sel = a->glyph == val;
+            if (!row_visible(yy, ch)) continue;
+            rrect(x, yy, cw, ch, S(8), C_CARD);
+            if (i == 0) text(fBold, C_TEXT, x, yy, cw, ch, L"자동", 1);
+            else if (i == 1) {
+                HICON ic = app_icon(a);
+                if (ic) DrawIconEx(g_dc, x + (cw - S(32)) / 2, yy + S(4), ic, S(32), S(32), 0, NULL, DI_NORMAL);
+                text(fSmall, C_SUB, x, yy + ch - S(16), cw, S(14), ic ? L"원래" : L"원래(없음)", 1);
+            } else {
+                int gs = S(36);
+                draw_glyph(val, x + (cw - gs) / 2, yy, gs, C_TEXT);
+                text(fSmall, C_SUB, x, yy + ch - S(16), cw, S(14), GLYPH_NAME[val], 1);
+            }
+            if (sel) frame(x - S(2), yy - S(2), cw + S(4), ch + S(4), S(9), S(3), C_ACCENT);
+            else if (pressed(H_EGLYPH, i)) frame(x - S(2), yy - S(2), cw + S(4), ch + S(4), S(9), S(3), C_TEXT);
+            hit_row(x, yy, cw, ch, H_EGLYPH, i);
+        }
+        y += ((G_N + 1 + cols - 1) / cols) * (ch + gap);
+    }
+    y += S(12);
+    g_contentH[SCR_EDIT] = y - y0;
+    list_clip(0);
+    paint_title(a ? a->name : L"모든 앱 블럭 색", NULL);
 }
 
 static void paint_menu(void)
@@ -2013,7 +2365,10 @@ static void paint_toast(void)
 static void paint_all(HDC hdc)
 {
     HDC mdc = CreateCompatibleDC(hdc);
-    HBITMAP bm = CreateCompatibleBitmap(hdc, W, H), ob = (HBITMAP)SelectObject(mdc, bm);
+    HBITMAP bm = NULL, ob;
+    g_bits = new_dib(W, H, &bm);
+    if (!bm) { bm = CreateCompatibleBitmap(hdc, W, H); g_bits = NULL; }
+    ob = (HBITMAP)SelectObject(mdc, bm);
     g_dc = mdc;
     g_hitN = 0;
     SetBkMode(mdc, TRANSPARENT);
@@ -2031,6 +2386,7 @@ static void paint_all(HDC hdc)
     case SCR_RUN:  paint_running(); break;
     case SCR_SET:  paint_settings(); break;
     case SCR_WALL: paint_wallpick(); break;
+    case SCR_EDIT: paint_edit(); break;
     }
     paint_nav();
     paint_toast();
@@ -2039,6 +2395,7 @@ static void paint_all(HDC hdc)
     SelectObject(mdc, ob);
     DeleteObject(bm);
     DeleteDC(mdc);
+    g_bits = NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2125,6 +2482,7 @@ static void menu_do(int i)
     g_menu.on = 0;
     g_focus = -1;
     switch (act) {
+    case M_FAV_EDIT: g_editIdx = t; go(SCR_EDIT); return;
     case M_FAV_REMOVE:
         _snwprintf(m, 96, L"%s 을(를) 홈에서 뺐어요", g_fav[t].name);
         fav_remove(t); save_settings(); toast(m);
@@ -2162,7 +2520,8 @@ static void option_do(int i)
         break;
     }
     case O_WALL: go(SCR_WALL); return;
-    case O_CLOCK: g_set.clock24 = !g_set.clock24; save_settings(); break;
+    case O_ALPHA: g_set.opacity = (g_set.opacity + 1) % 5; save_settings(); break;
+    case O_BLOCK: g_editIdx = -1; go(SCR_EDIT); return;
     case O_RESET:
         scan_all(); fav_defaults(); g_set.addPos = -1; save_settings(); g_page = 0;
         toast(L"홈을 처음 상태로 되돌렸어요");
@@ -2190,7 +2549,33 @@ static void activate(int id, int arg)
     case H_NAV_ALL: go(g_scr == SCR_ALL ? SCR_HOME : SCR_ALL); break;
     case H_NAV_RUN: go(g_scr == SCR_RUN ? SCR_HOME : SCR_RUN); break;
     case H_NAV_SET: go(g_scr == SCR_SET ? SCR_HOME : SCR_SET); break;
-    case H_BACK: case H_DONE: go(g_scr == SCR_WALL ? SCR_SET : SCR_HOME); break;
+    case H_BACK: case H_DONE: go(g_scr == SCR_WALL || (g_scr == SCR_EDIT && g_editIdx < 0) ? SCR_SET : SCR_HOME); break;
+    case H_ECOLOR:
+        if (g_editIdx >= 0 && g_editIdx < g_favN) g_fav[g_editIdx].color = arg;
+        else {
+            int k;
+            for (k = 0; k < g_favN; k++) g_fav[k].color = arg;
+            toast(arg ? L"모든 앱 블럭 색을 바꿨어요" : L"모든 앱 블럭 색을 자동으로 했어요");
+        }
+        save_settings();
+        redraw();
+        break;
+    case H_EALL:
+        if (g_editIdx >= 0 && g_editIdx < g_favN) {
+            int k, c = g_fav[g_editIdx].color;
+            for (k = 0; k < g_favN; k++) g_fav[k].color = c;
+            save_settings();
+            toast(L"모든 앱에 같은 색을 적용했어요");
+            redraw();
+        }
+        break;
+    case H_EGLYPH:
+        if (g_editIdx >= 0 && g_editIdx < g_favN) {
+            g_fav[g_editIdx].glyph = arg == 0 ? 0 : arg == 1 ? -1 : arg - 1;
+            save_settings();
+            redraw();
+        }
+        break;
     case H_ROW:
         if (g_scr == SCR_ALL && arg < g_allN) {
             if (g_addMode) {
@@ -2242,7 +2627,7 @@ static int hit_test(int x, int y)
     return -1;
 }
 
-static int scrollable(void) { return g_scr == SCR_ALL || g_scr == SCR_RUN || g_scr == SCR_SET || g_scr == SCR_WALL; }
+static int scrollable(void) { return g_scr == SCR_ALL || g_scr == SCR_RUN || g_scr == SCR_SET || g_scr == SCR_WALL || g_scr == SCR_EDIT; }
 
 static void on_down(int x, int y)
 {
@@ -2356,6 +2741,7 @@ static void on_up(int x, int y)
             g_lift = -1;
             menu_open(g_fav[li].name, li);
             g_menu.hint = L"꾹 누른 채 끌면 원하는 칸으로 옮겨져요";
+            menu_item(M_FAV_EDIT, L"블럭 색·아이콘 바꾸기");
             menu_item(M_FAV_REMOVE, L"홈에서 빼기");
             menu_item(M_CANCEL, L"닫기");
         }
@@ -2408,7 +2794,7 @@ static int on_key(WPARAM k)
     if (k == VK_F2) { go(g_scr == SCR_RUN ? SCR_HOME : SCR_RUN); return 1; }
     if (k == VK_ESCAPE || k == VK_BACK) {
         if (g_menu.on) { g_menu.on = 0; redraw(); return 1; }
-        if (g_scr == SCR_WALL) { go(SCR_SET); return 1; }
+        if (g_scr == SCR_WALL || (g_scr == SCR_EDIT && g_editIdx < 0)) { go(SCR_SET); return 1; }
         if (g_scr != SCR_HOME) { go(SCR_HOME); return 1; }
         return 1;
     }
