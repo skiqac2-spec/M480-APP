@@ -20,7 +20,7 @@
 
 #define APP_CLASS L"M480BattWnd"
 #define APP_TITLE L"배터리 진단"
-#define APP_VER   L"1.0"
+#define APP_VER   L"1.1"
 
 #define SAMPLE_MS     10000   /* 평소 기록 간격 */
 #define FAST_MS       150     /* 깨어난 직후 측정 간격 */
@@ -111,6 +111,10 @@ static PFN_CreateMQ pCreateMQ;
 static PFN_ReadMQ pReadMQ;
 static PFN_ReqPN pReqPN;
 static PFN_Special pSpecial;
+static PFN_FullScreen pFullScreen;
+static HWND g_sipHidden;
+static DWORD g_rawV = 0xFFFFFFFF, g_rawT, g_rawC;   /* 기기가 준 원래 값 (확인용) */
+static int g_rawChem, g_rawOK = -1;
 
 static void load_funcs(void)
 {
@@ -121,6 +125,8 @@ static void load_funcs(void)
     pReadMQ = (PFN_ReadMQ)GetProcAddressW(h, L"ReadMsgQueue");
     pReqPN = (PFN_ReqPN)GetProcAddressW(h, L"RequestPowerNotifications");
     pSpecial = (PFN_Special)GetProcAddressW(h, L"SHGetSpecialFolderPath");
+    h = LoadLibraryW(L"aygshell.dll");
+    if (h) pFullScreen = (PFN_FullScreen)GetProcAddressW(h, L"SHFullScreen");
 }
 
 /* ------------------------------------------------------------------ */
@@ -152,9 +158,13 @@ static void measure(Meas *m, BOOL update)
         return;
     }
     memset(&s, 0, sizeof(s));
-    if (!pPowEx2(&s, sizeof(s), update)) return;
+    if (!pPowEx2(&s, sizeof(s), update)) { g_rawOK = 0; return; }
+    g_rawOK = 1;
+    g_rawV = s.BatteryVoltage; g_rawT = s.BatteryTemperature; g_rawC = (DWORD)s.BatteryCurrent;
+    g_rawChem = s.BatteryChemistry;
     if (s.BatteryLifePercent <= 100) m->pct = s.BatteryLifePercent;
     if (s.BatteryVoltage > 2000 && s.BatteryVoltage < 5000) m->mv = (int)s.BatteryVoltage;
+    else if (s.BatteryVoltage > 20000 && s.BatteryVoltage < 50000) m->mv = (int)(s.BatteryVoltage / 10);
     m->ma = (int)s.BatteryCurrent;
     if (m->ma < -5000 || m->ma > 5000) m->ma = 0;
     if (s.BatteryTemperature > 0 && s.BatteryTemperature < 900) m->temp = (int)s.BatteryTemperature;
@@ -889,7 +899,7 @@ static void draw_main(void)
     y += cardH + S(5);
 
     /* 그래프 */
-    gh = S(62);
+    gh = S(54);
     rrect(x, y, w, gh, S(10), C_CARD);
     gy = y;
     {
@@ -1029,6 +1039,13 @@ static void draw_log(void)
         fill(x + S(4), y - S(1), w - S(8), 1, C_SEP);
     }
     y += S(6);
+    if (g_rawOK == 1)
+        _snwprintf(s, 200, L"기기가 주는 값: 전압 %lu · 전류 %ld · 온도 %lu · 종류 %d%s",
+                   (unsigned long)g_rawV, (long)(LONG)g_rawC, (unsigned long)g_rawT, g_rawChem,
+                   g_hasVolt ? L"" : L" (전압을 안 알려 주는 기기라 잔량으로 판정합니다)");
+    else
+        wcscpy(s, L"기기가 배터리 자세한 정보를 주지 않습니다 (잔량으로 판정합니다)");
+    y += para(fSmall, C_DIM, x + S(4), y, w - S(8), s, 1) + S(6);
     para(fSmall, C_DIM, x + S(4), y, w - S(8), L"기록 파일: 앱 폴더의 M480Batt_log.csv (PC에서 엑셀로 열 수 있음)", 1);
     y += S(32);
     g_contentH = y + g_scroll - top;
@@ -1065,14 +1082,30 @@ static void paint(HDC hdc)
 /* ------------------------------------------------------------------ */
 /* 동작                                                                */
 /* ------------------------------------------------------------------ */
+/* 화면 아래 가운데 키보드(가) 단추가 아래 단추를 가리지 않게: 앞에 있을 때만 숨김 */
+static void sip_button(int hide)
+{
+    HWND sb;
+    if (pFullScreen) pFullScreen(g_hwnd, hide ? 0x0008 /* SHFS_HIDESIPBUTTON */ : 0x0004 /* SHFS_SHOWSIPBUTTON */);
+    if (hide) {
+        sb = FindWindowW(L"MS_SIPBUTTON", NULL);
+        if (sb && IsWindowVisible(sb)) { ShowWindow(sb, SW_HIDE); g_sipHidden = sb; }
+    } else if (g_sipHidden) {
+        if (IsWindow(g_sipHidden)) ShowWindow(g_sipHidden, SW_SHOW);
+        g_sipHidden = NULL;
+    }
+}
+
 static void hide_me(void)
 {
+    sip_button(0);
     ShowWindow(g_hwnd, SW_HIDE);
 }
 
 static void quit_app(void)
 {
     Meas m;
+    sip_button(0);
     measure(&m, FALSE);
     log_kind("END", &m);
     PostQuitMessage(0);
@@ -1148,6 +1181,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == T_SAMPLE) on_sample();
         else if (wp == T_FAST) on_fast();
+        else if (wp == 4) { KillTimer(hwnd, 4); if (GetForegroundWindow() == hwnd) sip_button(1); }
         else if (wp == T_TOAST) {
             DWORD now = GetTickCount();
             int busy = (g_toast[0] && now < g_toastUntil) || (g_clearArm && now - g_clearArm < 3000);
@@ -1161,8 +1195,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SHOWME:
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
+        sip_button(1);
         redraw();
         return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) != WA_INACTIVE) { sip_button(1); SetTimer(hwnd, 4, 300, NULL); }
+        else sip_button(0);
+        break;
     case WM_LBUTTONDOWN:
         g_down = hit_at((short)LOWORD(lp), (short)HIWORD(lp));
         g_downY = (short)HIWORD(lp);
@@ -1289,7 +1328,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
                                0, 0, r.right - r.left, r.bottom - r.top, NULL, NULL, hInst, NULL);
     }
 #else
-    g_hwnd = CreateWindowW(APP_CLASS, APP_TITLE, 0,
+    g_hwnd = CreateWindowW(APP_CLASS, APP_TITLE, WS_CLIPCHILDREN | (bg ? 0 : WS_VISIBLE),
                            wa.left, wa.top, wa.right - wa.left, wa.bottom - wa.top, NULL, NULL, hInst, NULL);
 #endif
     if (!g_hwnd) return 0;
