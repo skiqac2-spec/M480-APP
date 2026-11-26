@@ -102,6 +102,10 @@ static int doc_is_foreign(Doc *d);
 static int g_down, g_dragging, g_down_x, g_down_y, g_last_y, g_press_link = -1, g_press_ctl = -1;
 static DWORD g_last_t;
 static int g_vel;      /* px per 25ms * 16 */
+static int g_sbdrag, g_sboff;   /* dragging the scroll handle on the right */
+static int g_nofire;            /* this touch stopped a fling: don't open anything */
+#define SB_W  30                /* scroll handle touch width (like M480Tube) */
+#define SB_TH 52                /* scroll handle height */
 static int g_field_ctl = -1;
 static int g_hold_link = -1;
 static HBITMAP g_back_bm;
@@ -557,7 +561,7 @@ static DWORD WINAPI load_thread(LPVOID p)
 				Img *im = &j->doc->imgs[0];
 				free(im->url);
 				im->url = xstrdup(j->resp.url);
-				if (img_decode((unsigned char *)j->resp.body.p, j->resp.body.len, view_width() - SC(8), im)) im->state = 2;
+				if (img_decode((unsigned char *)j->resp.body.p, j->resp.body.len, view_width() - SB_W - SC(4), im)) im->state = 2;
 				else im->state = 3;
 			}
 		} else {
@@ -637,7 +641,7 @@ static void start_images(void)
 	ij->doc = g_doc;
 	doc_addref(g_doc);
 	ij->gen = g_gen;
-	ij->maxw = view_width() - SC(8);
+	ij->maxw = view_width() - SB_W - SC(4);
 	g_imgctl = &ij->ctl;
 	th = CreateThread(NULL, THREAD_STACK, img_thread, ij, THREAD_FLAGS, NULL);
 	if (th) CloseHandle(th);
@@ -1626,7 +1630,7 @@ static void update_scrollbar(void)
 	si.nMax = g_lay.height > 0 ? g_lay.height - 1 : 0;
 	si.nPage = view_height();
 	si.nPos = g_scroll;
-	SetScrollInfo(g_view, SB_VERT, &si, TRUE);
+	(void)si; /* no system scroll bar: the page draws its own scroll handle */
 }
 
 static void set_scroll(int y)
@@ -1654,7 +1658,7 @@ static void relayout(int keep_anchor)
 		if (lo < g_lay.nboxes) { anchor_item = g_lay.boxes[lo].item; anchor_off = g_lay.boxes[lo].y - g_scroll; }
 	}
 	hdc = GetDC(g_view);
-	layout_doc(&g_lay, hdc, g_doc, view_width() - (IS_CE ? 0 : 0));
+	layout_doc(&g_lay, hdc, g_doc, view_width() - SB_W + 4);   /* right strip kept for the scroll handle */
 	ReleaseDC(g_view, hdc);
 	if (anchor_item >= 0 && g_scroll > 0) {
 		int ny = layout_item_y(&g_lay, anchor_item) - anchor_off;
@@ -1797,6 +1801,26 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		old = SelectObject(mdc, g_back_bm);
 		FillRect(mdc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
 		layout_paint(&g_lay, mdc, g_scroll, r.bottom, g_press_link, g_press_ctl);
+		if (g_lay.height > r.bottom && r.bottom > SB_TH) {
+			/* scroll handle on the right: drag it to move through long pages quickly */
+			int w = r.right, hgt = r.bottom;
+			int by = (int)((long)g_scroll * (hgt - SB_TH) / (g_lay.height - hgt));
+			int x0 = w - SB_W + 6, x1 = w - 2, cx = (x0 + x1) / 2, k;
+			COLORREF hc = g_sbdrag ? RGB(120, 150, 210) : RGB(200, 208, 222), fg = RGB(60, 70, 90);
+			RECT rr;
+			HBRUSH br;
+#define SBFILL(L, T, R, B, C) do { rr.left = (L); rr.top = (T); rr.right = (R); rr.bottom = (B); br = CreateSolidBrush(C); FillRect(mdc, &rr, br); DeleteObject(br); } while (0)
+			SBFILL(w - 3, 0, w - 1, hgt, RGB(215, 218, 225));                 /* track */
+			SBFILL(x0 - 1, by - 1, x1 + 1, by + SB_TH + 1, RGB(150, 155, 170)); /* border */
+			SBFILL(x0, by, x1, by + SB_TH, hc);
+			for (k = 0; k < 6; k++) {                                             /* up / down arrows */
+				SBFILL(cx - k, by + 8 + k, cx + k + 1, by + 9 + k, fg);
+				SBFILL(cx - k, by + SB_TH - 9 - k, cx + k + 1, by + SB_TH - 8 - k, fg);
+			}
+			SBFILL(x0 + 5, by + SB_TH / 2 - 3, x1 - 5, by + SB_TH / 2 - 2, fg); /* grip */
+			SBFILL(x0 + 5, by + SB_TH / 2 + 1, x1 - 5, by + SB_TH / 2 + 2, fg);
+#undef SBFILL
+		}
 		BitBlt(hdc, 0, 0, r.right, r.bottom, mdc, 0, 0, SRCCOPY);
 		SelectObject(mdc, old);
 		DeleteDC(mdc);
@@ -1848,11 +1872,32 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		if (g_picker) { picker_close(); return 0; }
 		SetCapture(h);
 		if (GetFocus() != h && !g_picker) SetFocus(h);
+		/* a touch that stops a moving page only stops it */
+		g_nofire = g_vel != 0;
 		KillTimer(g_hwnd, TM_KINETIC);
 		g_vel = 0;
+		{
+			RECT cr;
+			int vh;
+			GetClientRect(h, &cr);
+			vh = cr.bottom;
+			if (x >= cr.right - SB_W && g_lay.height > vh && vh > SB_TH) {
+				int by = (int)((long)g_scroll * (vh - SB_TH) / (g_lay.height - vh));
+				int on = (y >= by && y < by + SB_TH);
+				if (g_field) field_commit(1);
+				g_sbdrag = 1;
+				g_sboff = on ? y - by : SB_TH / 2;   /* tap the track: jump there */
+				g_down = 0;
+				g_press_link = g_press_ctl = -1;
+				if (!on) set_scroll((int)((long)(y - g_sboff) * (g_lay.height - vh) / (vh - SB_TH)));
+				InvalidateRect(h, NULL, FALSE);
+				return 0;
+			}
+		}
 		g_down = 1; g_dragging = 0;
 		g_down_x = x; g_down_y = y; g_last_y = y; g_last_t = GetTickCount();
-		layout_hit(&g_lay, x, y + g_scroll, &g_press_link, &g_press_ctl);
+		if (g_nofire) g_press_link = g_press_ctl = -1;
+		else layout_hit(&g_lay, x, y + g_scroll, &g_press_link, &g_press_ctl);
 #ifdef M480_DEBUG
 		{ FILE *lf = fopen("C:\\nav.log", "a"); if (lf) { fprintf(lf, "down %d %d link=%d ctl=%d\n", x, y + g_scroll, g_press_link, g_press_ctl); { int q; for (q = 0; q < g_lay.nboxes && q < 30; q++) fprintf(lf, " box%d it=%d type=%d x=%d y=%d w=%d h=%d lb=%d\n", q, g_lay.boxes[q].item, g_doc->items[g_lay.boxes[q].item].type, g_lay.boxes[q].x, g_lay.boxes[q].y, g_lay.boxes[q].w, g_lay.boxes[q].h, g_lay.boxes[q].lb); } fclose(lf); } }
 #endif
@@ -1865,8 +1910,16 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 	case WM_MOUSEMOVE: {
 		int x = (short)LOWORD(l), y = (short)HIWORD(l);
 		DWORD t = GetTickCount();
+		if (g_sbdrag) {
+			RECT cr;
+			GetClientRect(h, &cr);
+			if (g_lay.height > cr.bottom && cr.bottom > SB_TH)
+				set_scroll((int)((long)(y - g_sboff) * (g_lay.height - cr.bottom) / (cr.bottom - SB_TH)));
+			return 0;
+		}
 		if (!g_down) return 0;
-		if (!g_dragging && (abs(y - g_down_y) > SC(8) || abs(x - g_down_x) > SC(8))) {
+		/* any real movement means scrolling, never a tap */
+		if (!g_dragging && (abs(y - g_down_y) > 6 || abs(x - g_down_x) > 10)) {
 			g_dragging = 1;
 			KillTimer(g_hwnd, TM_HOLD);
 			if (g_press_link >= 0 || g_press_ctl >= 0) { g_press_link = g_press_ctl = -1; InvalidateRect(h, NULL, FALSE); }
@@ -1887,15 +1940,18 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		int link = g_press_link, ctl = g_press_ctl;
 		KillTimer(g_hwnd, TM_HOLD);
 		ReleaseCapture();
+		if (g_sbdrag) { g_sbdrag = 0; InvalidateRect(h, NULL, FALSE); return 0; }
 		if (!g_down) return 0;
 		g_down = 0;
 		g_press_link = g_press_ctl = -1;
 		if (g_dragging) {
 			if (GetTickCount() - g_last_t > 120) g_vel = 0;
 			if (abs(g_vel) > 16 * 3) SetTimer(g_hwnd, TM_KINETIC, 25, NULL);
+			else g_vel = 0;
 			return 0;
 		}
 		InvalidateRect(h, NULL, FALSE);
+		if (g_nofire) return 0;
 		if (ctl >= 0) activate_ctl(ctl);
 		else if (link >= 0 && g_doc && link < g_doc->nlinks) navigate(g_doc->links[link], NULL, 0, NULL, NAV_NEW);
 		return 0;
@@ -2425,7 +2481,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		g_hwnd = h;
 		g_addr = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 0, 0, 10, 10, h, (HMENU)ID_ADDR, g_inst, NULL);
 		g_addr_proc = (WNDPROC)SetWindowLongW(g_addr, GWL_WNDPROC, (LONG)addr_proc);
-		g_view = CreateWindowExW(0, VIEWCLASS, L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL, 0, 0, 10, 10, h, NULL, g_inst, NULL);
+		g_view = CreateWindowExW(0, VIEWCLASS, L"", WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, h, NULL, g_inst, NULL);
 		return 0;
 	}
 	case WM_SIZE:
