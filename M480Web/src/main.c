@@ -519,6 +519,154 @@ static void namu_toolbar(Buf *b, const char *url)
 	buf_adds(b, "<hr>");
 }
 
+
+char *namumark_to_html(const char *src, int len, const char *title);
+
+/* namu.wiki sometimes answers with its JavaScript shell only ("Loading...") */
+static int namu_is_shell(Doc *d)
+{
+	int i, n = 0;
+	for (i = 0; i < d->nitems; i++) {
+		Item *it = &d->items[i];
+		int k;
+		if (it->type != IT_TEXT) continue;
+		for (k = 0; k < it->len; k++) if (d->text.p[it->text + k] != ' ') n++;
+		if (n > 60) return 0;
+	}
+	return 1;
+}
+
+static char *pct_decode(const char *s, int n)
+{
+	Buf b;
+	int i;
+	buf_init(&b);
+	for (i = 0; i < n; i++) {
+		if (s[i] == '%' && i + 2 < n) { char hx[3] = { s[i + 1], s[i + 2], 0 }; buf_addc(&b, (char)strtol(hx, NULL, 16)); i += 2; }
+		else buf_addc(&b, s[i]);
+	}
+	return buf_detach(&b);
+}
+
+/* document part of a namu.wiki /w/ URL (still %-encoded); NULL if not a document */
+static char *namu_doc_part(const char *url)
+{
+	const char *w = strstr(url, "namu.wiki/w/");
+	const char *e;
+	if (!w) return NULL;
+	w += 12;
+	e = w;
+	while (*e && *e != '?' && *e != '#') e++;
+	return e > w ? xstrndup(w, (int)(e - w)) : NULL;
+}
+
+static void html_unescape(Buf *o, const char *s, int n)
+{
+	int i;
+	for (i = 0; i < n; i++) {
+		if (s[i] == '&') {
+			if (!strncmp(s + i, "&lt;", 4)) { buf_addc(o, '<'); i += 3; continue; }
+			if (!strncmp(s + i, "&gt;", 4)) { buf_addc(o, '>'); i += 3; continue; }
+			if (!strncmp(s + i, "&amp;", 5)) { buf_addc(o, '&'); i += 4; continue; }
+			if (!strncmp(s + i, "&quot;", 6)) { buf_addc(o, '"'); i += 5; continue; }
+			if (!strncmp(s + i, "&#39;", 5)) { buf_addc(o, '\''); i += 4; continue; }
+			if (!strncmp(s + i, "&#x27;", 6)) { buf_addc(o, '\''); i += 5; continue; }
+		}
+		buf_addc(o, s[i]);
+	}
+}
+
+/* Try harder for a namu.wiki document that came back empty:
+   1) fetch it again (the shell is usually a temporary server-side fallback),
+   2) fetch the raw markup (/raw/) and render it ourselves.
+   Returns a new Doc or NULL. Runs in the loader thread. */
+static Doc *namu_rescue(Job *j)
+{
+	char *part = namu_doc_part(j->resp.url);
+	int tries;
+	Doc *d = NULL;
+	if (!part) return NULL;
+	for (tries = 1; tries <= 2 && !j->ctl.abort; tries++) {
+		HttpResp r;
+		Sleep(800 * tries);
+		if (j->ctl.abort) break;
+		PostMessageW(g_hwnd, WM_APP_PROGRESS, 0, -2 - tries);
+		if (http_request(j->resp.url, "GET", NULL, 0, NULL, NULL, &r, &j->ctl, 8 * 1024 * 1024) && r.status == 200 && r.body.p) {
+			Buf nb;
+			buf_init(&nb);
+			namu_toolbar(&nb, r.url);
+			buf_add(&nb, r.body.p, r.body.len);
+			d = html_parse_ex(nb.p, nb.len, r.url, "utf-8", 0, HP_NAMU | HP_NOIMG);
+			buf_free(&nb);
+			if (!namu_is_shell(d)) { http_resp_free(&r); free(part); return d; }
+			doc_release(d);
+			d = NULL;
+		}
+		http_resp_free(&r);
+	}
+	if (!j->ctl.abort) {
+		HttpResp r;
+		Buf u;
+		buf_init(&u);
+		buf_adds(&u, "https://namu.wiki/raw/");
+		buf_adds(&u, part);
+		PostMessageW(g_hwnd, WM_APP_PROGRESS, 0, -9);
+		if (http_request(u.p, "GET", NULL, 0, NULL, NULL, &r, &j->ctl, 8 * 1024 * 1024) && r.status == 200 && r.body.p) {
+			Buf mk;
+			const char *b = r.body.p;
+			int n = r.body.len;
+			buf_init(&mk);
+			if (r.ctype && !strcmp(r.ctype, "text/plain")) buf_add(&mk, b, n);
+			else {
+				const char *ta = stristr(b, "<textarea");
+				if (ta) {
+					const char *st = strchr(ta, '>');
+					const char *en = st ? stristr(st, "</textarea>") : NULL;
+					if (st && en) html_unescape(&mk, st + 1, (int)(en - st - 1));
+				}
+			}
+			if (mk.len > 0) {
+				char *title = pct_decode(part, (int)strlen(part));
+				char *html = namumark_to_html(mk.p, mk.len, title);
+				Buf nb;
+				buf_init(&nb);
+				namu_toolbar(&nb, j->resp.url);
+				buf_adds(&nb, "<p><small>(나무위키가 본문을 보내지 않아 원본 글로 표시합니다)</small></p>");
+				buf_adds(&nb, html);
+				d = html_parse_ex(nb.p, nb.len, j->resp.url, "utf-8", 0, HP_NAMU | HP_NOIMG);
+				buf_free(&nb);
+				free(html);
+				free(title);
+			}
+			buf_free(&mk);
+		}
+		http_resp_free(&r);
+		buf_free(&u);
+	}
+	if (!d && !j->ctl.abort) {
+		/* explain instead of an empty page */
+		char *title = pct_decode(part, (int)strlen(part));
+		char *te = url_encode(title);
+		Buf nb;
+		buf_init(&nb);
+		namu_toolbar(&nb, j->resp.url);
+		buf_adds(&nb, "<h3>문서를 불러오지 못했습니다</h3><p>나무위키가 지금 이 문서의 본문을 보내 주지 않습니다 "
+			"(자바스크립트로만 보여 주는 상태). 잠시 뒤 다시 시도하면 열리는 경우가 많습니다.</p><ul><li><a href=\"");
+		h_esc(&nb, j->resp.url);
+		buf_adds(&nb, "\">다시 시도</a><li><a href=\"https://ko.m.wikipedia.org/w/index.php?title=%ED%8A%B9%EC%88%98:%EA%B2%80%EC%83%89&go=1&search=");
+		buf_adds(&nb, te);
+		buf_adds(&nb, "\">위키백과에서 '");
+		h_esc(&nb, title);
+		buf_adds(&nb, "' 찾기</a></ul>");
+		d = html_parse_ex(nb.p, nb.len, j->resp.url, "utf-8", 0, HP_NAMU | HP_NOIMG);
+		buf_free(&nb);
+		free(te);
+		free(title);
+	}
+	free(part);
+	return d;
+}
+
 static DWORD WINAPI load_thread(LPVOID p)
 {
 	Job *j = (Job *)p;
@@ -551,6 +699,15 @@ static DWORD WINAPI load_thread(LPVOID p)
 				if (j->resp.body.p) buf_add(&nb, j->resp.body.p, j->resp.body.len);
 				j->doc = html_parse_ex(nb.p, nb.len, j->resp.url, "utf-8", 0, HP_NAMU | HP_NOIMG);
 				buf_free(&nb);
+				if (namu_is_shell(j->doc)) {
+					char *pp = namu_doc_part(j->resp.url);
+					if (pp) {
+						Doc *nd;
+						free(pp);
+						nd = namu_rescue(j);
+						if (nd) { doc_release(j->doc); j->doc = nd; }
+					}
+				}
 			} else
 			j->doc = html_parse(j->resp.body.p ? j->resp.body.p : "", j->resp.body.len, j->resp.url, j->resp.charset, is_text);
 		} else if (ct && !strncmp(ct, "image/", 6)) {
@@ -2643,7 +2800,9 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		return 0;
 	case WM_APP_PROGRESS: {
 		char s[80];
-		if ((int)l > 0) _snprintf(s, sizeof s, "\xEB\xB6\x88\xEB\x9F\xAC\xEC\x98\xA4\xEB\x8A\x94 \xEC\xA4\x91... %d / %d KB", (int)w / 1024, (int)l / 1024);
+		if ((int)l == -9) _snprintf(s, sizeof s, "본문이 비어 있어 원본 글을 받는 중...");
+		else if ((int)l <= -3) _snprintf(s, sizeof s, "본문이 비어 있어 다시 받는 중... (%d)", -2 - (int)l);
+		else if ((int)l > 0) _snprintf(s, sizeof s, "\xEB\xB6\x88\xEB\x9F\xAC\xEC\x98\xA4\xEB\x8A\x94 \xEC\xA4\x91... %d / %d KB", (int)w / 1024, (int)l / 1024);
 		else _snprintf(s, sizeof s, "\xEB\xB6\x88\xEB\x9F\xAC\xEC\x98\xA4\xEB\x8A\x94 \xEC\xA4\x91... %d KB", (int)w / 1024);
 		status_set(s);
 		return 0;

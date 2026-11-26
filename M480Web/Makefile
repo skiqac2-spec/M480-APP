@@ -3,7 +3,7 @@
 # make win  -> desktop Win32 test build (i686-w64-mingw32), runnable under wine
 
 BEARSSL_SRC := $(wildcard third_party/bearssl/src/*/*.c)
-APP_SRC := src/main.c src/net.c src/html.c src/layout.c src/img.c src/url.c src/util.c
+APP_SRC := src/main.c src/net.c src/html.c src/layout.c src/img.c src/url.c src/util.c src/namumark.c
 INC := -Isrc -Ithird_party -Ithird_party/bearssl/inc -Ithird_party/bearssl/src
 BRDEFS := -DBR_USE_UNIX_TIME=0 -DBR_USE_WIN32_TIME=0 -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0
 
