@@ -171,6 +171,17 @@ static int sess_get(const char *host, int port, br_ssl_session_parameters *p)
 	LeaveCriticalSection(&g_cs);
 	return r;
 }
+static void sess_drop_url(const char *url)
+{
+	Url u;
+	int i;
+	if (!url_parse(url, &u)) return;
+	EnterCriticalSection(&g_cs);
+	for (i = 0; i < 12; i++) if (g_sess[i].used && g_sess[i].port == u.port && strcmp(g_sess[i].host, u.host) == 0) g_sess[i].used = 0;
+	LeaveCriticalSection(&g_cs);
+	url_free(&u);
+}
+
 static void sess_put(const char *host, int port, const br_ssl_session_parameters *p)
 {
 	int i, best = 0;
@@ -1045,6 +1056,22 @@ int http_request(const char *url, const char *method, const char *body, int body
 			}
 		}
 #endif
+		/* flaky mobile / Wi-Fi links: a dropped or timed-out connection is retried
+		   (twice, fresh TLS session) as long as nothing was received yet */
+		{
+			int tries = 0;
+			while (!ok && tries < 2 && !strcmp(meth, "GET") && !(ctl && ctl->abort) && !tmp.certerr && tmp.status == 0 &&
+			       !tmp.sink && tmp.body.len == 0 && strcmp(tmp.err, "\xEC\xB7\xA8\xEC\x86\x8C\xEB\x90\xA8")) {
+				tries++;
+				sess_drop_url(cur);
+				free(loc); loc = NULL;
+				http_resp_free(&tmp);
+				memset(&tmp, 0, sizeof tmp);
+				Sleep(700 * tries);
+				if (ctl && ctl->abort) break;
+				ok = do_one(cur, meth, body, bodylen, ctype, ref, &tmp, ctl, maxbytes, &loc);
+			}
+		}
 		if (!ok && is_time_err(tmp.certerr) && time_sync(ctl)) {
 			free(loc); loc = NULL;
 			http_resp_free(&tmp);

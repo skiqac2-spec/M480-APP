@@ -451,6 +451,11 @@ static void pop1(B *b)
 	if (!b->skip) {
 		if (f->flags & F_BLOCK) emit_block(b, f->margin);
 		if (f->flags & F_OUTDENT) { emit_block(b, 0); add_item(b, IT_OUTDENT); }
+		/* reader mode: a thin rule under main section headings */
+		if ((b->flags & HP_NAMU) && (f->tag == T_H1 || f->tag == T_H2)) {
+			add_item(b, IT_HR)->link = -1;
+			emit_block(b, 0);
+		}
 	}
 	if (f->flags & F_LIST) { if (b->list_depth > 0) b->list_depth--; if (!b->skip) emit_block(b, b->list_depth ? 0 : 1); }
 	b->style = f->prev_style;
@@ -802,8 +807,11 @@ static void start_tag(B *b, int t, int selfclose)
 		push(b, t, 0, 0);
 		u = attr_url(b, "href");
 		if (u && *u && !strnieq(u, "javascript:", 11)) {
+			int fn = (b->flags & HP_NAMU) && strstr(u, "#fn-") != NULL;
 			b->link = add_link(d, u);
-			b->style |= S_LINK | S_U;
+			/* reader mode: links coloured but not underlined; footnote marks small */
+			b->style |= (b->flags & HP_NAMU) ? S_LINK : (S_LINK | S_U);
+			if (fn) b->style = (unsigned short)(b->style & ~S_SZ_MASK);
 		} else free(u);
 		return;
 	}

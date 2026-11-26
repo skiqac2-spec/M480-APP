@@ -39,7 +39,7 @@ int img_decode(const unsigned char *data, int len, int maxw, Img *im);
 
 enum { M_HOME = 1000, M_RELOAD, M_ADDBM, M_BOOKMARKS, M_HISTORY, M_SIMPLE, M_IMAGES, M_INFO, M_COOKIES, M_EXIT,
        M_FONT0, M_FONT1, M_FONT2, M_FONT3, M_UA0, M_UA1, M_UA2, M_UA3, M_TOP, M_BOTTOM,
-       M_LOPEN, M_LCOPY, M_LSIMPLE, M_LSAVEIMG, M_ADDSC, M_EDITSC, M_FILES, M_TRANSLATE, M_AUTOTR };
+       M_LOPEN, M_LCOPY, M_LSIMPLE, M_LSAVEIMG, M_ADDSC, M_EDITSC, M_FILES, M_TRANSLATE, M_AUTOTR, M_DARK };
 
 static const char *g_uas[4] = {
 	"Opera/9.80 (J2ME/MIDP; Opera Mini/9.80 (S60; SymbOS; Opera Mobi/23.348; U; ko) Presto/2.5.25 Version/10.54",
@@ -64,6 +64,7 @@ static int g_loading;
 static volatile LONG g_gen;
 static int g_set_font = 1, g_set_ua = 0;
 static int g_autotr;   /* translate foreign pages automatically */
+static HBRUSH g_ctl_br;  /* edit-control background brush for dark mode */
 #define DEFAULT_REPO "https://raw.githubusercontent.com/skiqac2-spec/M480-APP/main/downloads/files.txt"
 static char g_repo[400] = DEFAULT_REPO;
 static char g_token[160];
@@ -133,6 +134,7 @@ static void settings_load(void)
 		else if (!strncmp(line, "images=", 7)) g_images_on = atoi(line + 7) ? 1 : 0;
 		else if (!strncmp(line, "ua=", 3)) g_set_ua = atoi(line + 3) & 3;
 		else if (!strncmp(line, "autotr=", 7)) g_autotr = atoi(line + 7) ? 1 : 0;
+		else if (!strncmp(line, "dark=", 5)) g_dark = atoi(line + 5) ? 1 : 0;
 		else if (!strncmp(line, "repo=", 5) || !strncmp(line, "token=", 6)) {
 			char *v = strchr(line, '=') + 1;
 			int n = (int)strlen(v);
@@ -150,7 +152,7 @@ static void settings_save(void)
 	app_path(p, L"settings.ini");
 	f = _wfopen(p, L"wb");
 	if (!f) return;
-	fprintf(f, "font=%d\nimages=%d\nua=%d\nautotr=%d\nrepo=%s\ntoken=%s\n", g_set_font, g_images_on, g_set_ua, g_autotr, g_repo, g_token);
+	fprintf(f, "font=%d\nimages=%d\nua=%d\nautotr=%d\ndark=%d\nrepo=%s\ntoken=%s\n", g_set_font, g_images_on, g_set_ua, g_autotr, g_dark, g_repo, g_token);
 	fclose(f);
 }
 
@@ -1799,19 +1801,19 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		}
 		mdc = CreateCompatibleDC(hdc);
 		old = SelectObject(mdc, g_back_bm);
-		FillRect(mdc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
+		{ HBRUSH bgb = CreateSolidBrush(C_BG); FillRect(mdc, &r, bgb); DeleteObject(bgb); }
 		layout_paint(&g_lay, mdc, g_scroll, r.bottom, g_press_link, g_press_ctl);
 		if (g_lay.height > r.bottom && r.bottom > SB_TH) {
 			/* scroll handle on the right: drag it to move through long pages quickly */
 			int w = r.right, hgt = r.bottom;
 			int by = (int)((long)g_scroll * (hgt - SB_TH) / (g_lay.height - hgt));
 			int x0 = w - SB_W + 6, x1 = w - 2, cx = (x0 + x1) / 2, k;
-			COLORREF hc = g_sbdrag ? RGB(120, 150, 210) : RGB(200, 208, 222), fg = RGB(60, 70, 90);
+			COLORREF hc = g_sbdrag ? DK(RGB(120, 150, 210), RGB(80, 105, 160)) : DK(RGB(200, 208, 222), RGB(62, 66, 78)), fg = DK(RGB(60, 70, 90), RGB(185, 190, 205));
 			RECT rr;
 			HBRUSH br;
 #define SBFILL(L, T, R, B, C) do { rr.left = (L); rr.top = (T); rr.right = (R); rr.bottom = (B); br = CreateSolidBrush(C); FillRect(mdc, &rr, br); DeleteObject(br); } while (0)
-			SBFILL(w - 3, 0, w - 1, hgt, RGB(215, 218, 225));                 /* track */
-			SBFILL(x0 - 1, by - 1, x1 + 1, by + SB_TH + 1, RGB(150, 155, 170)); /* border */
+			SBFILL(w - 3, 0, w - 1, hgt, DK(RGB(215, 218, 225), RGB(55, 58, 66)));                 /* track */
+			SBFILL(x0 - 1, by - 1, x1 + 1, by + SB_TH + 1, DK(RGB(150, 155, 170), RGB(95, 100, 115))); /* border */
 			SBFILL(x0, by, x1, by + SB_TH, hc);
 			for (k = 0; k < 6; k++) {                                             /* up / down arrows */
 				SBFILL(cx - k, by + 8 + k, cx + k + 1, by + 9 + k, fg);
@@ -1956,6 +1958,14 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		else if (link >= 0 && g_doc && link < g_doc->nlinks) navigate(g_doc->links[link], NULL, 0, NULL, NAV_NEW);
 		return 0;
 	}
+	case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: case WM_CTLCOLORSTATIC:
+		if (g_dark) {
+			if (!g_ctl_br) g_ctl_br = CreateSolidBrush(RGB(40, 42, 48));
+			SetTextColor((HDC)w, RGB(225, 225, 222));
+			SetBkColor((HDC)w, RGB(40, 42, 48));
+			return (LRESULT)g_ctl_br;
+		}
+		break;
 	case WM_KEYUP:
 		if (real_vk(h, w) == VK_F2) { PostMessageW(g_hwnd, WM_COMMAND, M_SOFTMENU, 0); return 0; }
 		break;
@@ -2021,8 +2031,8 @@ static void draw_toolbar(HDC hdc, int cw)
 {
 	RECT r;
 	int i, bw = tb_btn_w();
-	COLORREF on = RGB(40, 60, 90), off = RGB(170, 175, 185);
-	HBRUSH bg = CreateSolidBrush(RGB(222, 228, 238));
+	COLORREF on = DK(RGB(40, 60, 90), RGB(190, 200, 220)), off = DK(RGB(170, 175, 185), RGB(85, 90, 100));
+	HBRUSH bg = CreateSolidBrush(DK(RGB(222, 228, 238), RGB(38, 41, 49)));
 	r.left = 0; r.top = 0; r.right = cw; r.bottom = g_tb_h;
 	FillRect(hdc, &r, bg);
 	DeleteObject(bg);
@@ -2072,22 +2082,22 @@ static void draw_toolbar(HDC hdc, int cw)
 static void draw_status(HDC hdc, RECT *cr)
 {
 	RECT r = *cr;
-	HBRUSH bg = CreateSolidBrush(g_loading ? RGB(255, 246, 214) : RGB(236, 238, 242));
+	HBRUSH bg = CreateSolidBrush(g_loading ? DK(RGB(255, 246, 214), RGB(70, 60, 30)) : DK(RGB(236, 238, 242), RGB(34, 36, 42)));
 	WCHAR *w;
 	r.top = r.bottom - g_status_h;
 	FillRect(hdc, &r, bg);
 	DeleteObject(bg);
 	SelectObject(hdc, font_for(0));
 	SetBkMode(hdc, TRANSPARENT);
-	SetTextColor(hdc, RGB(60, 60, 70));
+	SetTextColor(hdc, DK(RGB(60, 60, 70), RGB(175, 178, 188)));
 	r.left += SC(3); r.right -= SC(3);
 	w = utf8_to_w(g_status, -1, NULL);
 	if (g_doc && !g_loading && g_tlsinfo[0]) {
 		RECT r2 = r;
-		SetTextColor(hdc, RGB(0, 120, 40));
+		SetTextColor(hdc, DK(RGB(0, 120, 40), RGB(90, 200, 120)));
 		DrawTextW(hdc, L"\x25A0", 1, &r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 		r.left += SC(12);
-		SetTextColor(hdc, RGB(60, 60, 70));
+		SetTextColor(hdc, DK(RGB(60, 60, 70), RGB(175, 178, 188)));
 	}
 	DrawTextW(hdc, w, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 	free(w);
@@ -2404,6 +2414,7 @@ static void show_menu(void)
 	AppendMenuW(m, MF_STRING, M_HISTORY, L"\xBC29\xBB38 \xAE30\xB85D");
 	AppendMenuW(m, MF_SEPARATOR, 0, NULL);
 	AppendMenuW(m, MF_STRING, M_SIMPLE, L"\xB2E8\xC21C\xD654 \xBCF4\xAE30 (FrogFind)");
+	AppendMenuW(m, MF_STRING | (g_dark ? MF_CHECKED : 0), M_DARK, L"다크 모드 (어두운 화면)");
 	AppendMenuW(m, MF_STRING | (g_images_on ? MF_CHECKED : 0), M_IMAGES, L"\xC774\xBBF8\xC9C0 \xD45C\xC2DC");
 	AppendMenuW(m, MF_POPUP, (UINT_PTR)fm, L"\xAE00\xC790 \xD06C\xAE30");
 	AppendMenuW(m, MF_POPUP, (UINT_PTR)um, L"\xBE0C\xB77C\xC6B0\xC800 \xC2DD\xBCC4");
@@ -2555,6 +2566,14 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 			if (g_doc && g_doc->translated) { g_tr_skip_auto = 1; navigate(g_doc->url, NULL, 0, NULL, NAV_RELOAD); }
 			else translate_page();
 			return 0;
+		case M_DARK:
+			g_dark = !g_dark;
+			settings_save();
+			if (g_ctl_br) { DeleteObject(g_ctl_br); g_ctl_br = NULL; }
+			InvalidateRect(h, NULL, TRUE);
+			InvalidateRect(g_view, NULL, FALSE);
+			InvalidateRect(g_addr, NULL, TRUE);
+			return 0;
 		case M_AUTOTR:
 			g_autotr = !g_autotr;
 			settings_save();
@@ -2629,6 +2648,14 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		status_set(s);
 		return 0;
 	}
+	case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: case WM_CTLCOLORSTATIC:
+		if (g_dark) {
+			if (!g_ctl_br) g_ctl_br = CreateSolidBrush(RGB(40, 42, 48));
+			SetTextColor((HDC)w, RGB(225, 225, 222));
+			SetBkColor((HDC)w, RGB(40, 42, 48));
+			return (LRESULT)g_ctl_br;
+		}
+		break;
 	case WM_APP_TRPROG: {
 		char st[80];
 		if (g_tr) { _snprintf(st, sizeof st, "번역 중... %d / %d", (int)w, (int)l); status_set(st); }

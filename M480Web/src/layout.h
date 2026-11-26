@@ -18,6 +18,9 @@ typedef struct {
 
 extern int g_scale100;     /* DPI scale *100 */
 extern int g_images_on;
+extern int g_dark;          /* dark colour scheme */
+#define DK(light, dark) (g_dark ? (dark) : (light))
+#define C_BG DK(RGB(255, 255, 255), RGB(24, 25, 29))
 
 void fonts_set_base(int px);
 int  fonts_base(void);

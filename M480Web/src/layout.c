@@ -4,6 +4,7 @@
 
 int g_scale100 = 100;
 int g_images_on = 1;
+int g_dark = 0;
 
 static HFONT g_fonts[32];
 static int g_fh[32], g_fasc[32];
@@ -55,9 +56,11 @@ static int font_index(int style)
 	return ((style & S_B) ? 1 : 0) | ((style & S_I) ? 2 : 0) | ((style & S_MONO) ? 4 : 0) | (S_SZ(style) << 3);
 }
 
+static void cw_reset(void);
 void fonts_set_base(int px)
 {
 	int i;
+	cw_reset();
 	for (i = 0; i < 32; i++) if (g_fonts[i]) { DeleteObject(g_fonts[i]); g_fonts[i] = NULL; }
 	g_base = px;
 }
@@ -189,8 +192,41 @@ static int can_break(const WCHAR *t, int i)
 	return 0;
 }
 
+/* per-font character width cache: measuring every character with GDI is slow on
+   a 400 MHz phone; long wiki pages lay out several times faster this way */
+static unsigned short *g_cw[32];
+static int g_cw_font = -1;
+
+static void cw_reset(void)
+{
+	int i;
+	for (i = 0; i < 32; i++) { free(g_cw[i]); g_cw[i] = NULL; }
+}
+
 static int measure_dx(HDC hdc, const WCHAR *t, int n, int *dx)
 {
+	if (g_cw_font >= 0) {
+		unsigned short *cw = g_cw[g_cw_font];
+		int i, acc = 0;
+		if (!cw) cw = g_cw[g_cw_font] = (unsigned short *)calloc(65536, sizeof(unsigned short));
+		if (cw) {
+			for (i = 0; i < n; i++) {
+				WCHAR c = t[i];
+				int w = cw[c];
+				if (!w) {
+					SIZE s1;
+					GetTextExtentPoint32W(hdc, &c, 1, &s1);
+					w = s1.cx + 1;
+					if (w > 65535) w = 65535;
+					cw[c] = (unsigned short)w;
+				}
+				acc += w - 1;
+				dx[i] = acc;
+			}
+			return acc;
+		}
+	}
+	{
 	SIZE sz;
 	int fit = 0;
 	if (!GetTextExtentExPointW(hdc, t, n, 0x7fffffff, &fit, dx, &sz)) {
@@ -205,6 +241,7 @@ static int measure_dx(HDC hdc, const WCHAR *t, int n, int *dx)
 		return acc;
 	}
 	return sz.cx;
+	}
 }
 
 #define CHUNK 300
@@ -218,6 +255,7 @@ static void layout_text(LS *s, int idx)
 	int pre = it->style & S_PRE;
 	static int dx[CHUNK + 1];
 	SelectObject(s->hdc, font_for(it->style));
+	g_cw_font = font_index(it->style);
 	while (pos < n) {
 		int chunk, k, lo, hi, avail, bpos, e;
 		if (!s->line_has || s->x == s->x0) {
@@ -356,7 +394,7 @@ void layout_doc(Layout *L, HDC hdc, Doc *d, int width)
 	memset(&s, 0, sizeof s);
 	s.L = L; s.hdc = hdc; s.d = d;
 	s.width = width;
-	s.margin = SC(4);
+	s.margin = SC(6);
 	s.unit = font_height(1 << S_SZ_SH) + SC(4);
 	s.right = width - s.margin;
 	s.halfline = font_height(1 << S_SZ_SH) / 2;
@@ -507,17 +545,17 @@ static void draw_ctl(Layout *L, HDC hdc, Ctl *c, int x, int y, int w, int h, int
 	int fh = font_height(st);
 	RECT r;
 	SelectObject(hdc, f);
-	SetTextColor(hdc, RGB(0, 0, 0));
+	SetTextColor(hdc, DK(RGB(0, 0, 0), RGB(222, 222, 218)));
 	r.left = x; r.top = y; r.right = x + w; r.bottom = y + h;
 	switch (c->type) {
 	case CT_TEXT: case CT_PASSWORD: case CT_TEXTAREA: {
 		const WCHAR *v = c->value ? c->value : L"";
 		int n = (int)wcslen(v);
-		fill(hdc, x, y, x + w, y + h, RGB(255, 255, 255));
-		frame(hdc, x, y, x + w, y + h, pressed ? RGB(0, 90, 220) : RGB(130, 130, 130));
+		fill(hdc, x, y, x + w, y + h, DK(RGB(255, 255, 255), RGB(40, 42, 48)));
+		frame(hdc, x, y, x + w, y + h, pressed ? DK(RGB(0, 90, 220), RGB(110, 160, 255)) : DK(RGB(130, 130, 130), RGB(110, 112, 120)));
 		r.left += SC(3); r.right -= SC(3); r.top += SC(3);
 		if (n == 0 && c->label) {
-			SetTextColor(hdc, RGB(160, 160, 160));
+			SetTextColor(hdc, DK(RGB(160, 160, 160), RGB(120, 120, 125)));
 			DrawTextW(hdc, c->label, -1, &r, DT_LEFT | DT_TOP | DT_NOPREFIX | (c->type == CT_TEXTAREA ? DT_WORDBREAK : DT_SINGLELINE));
 		} else if (c->type == CT_PASSWORD) {
 			WCHAR stars[64];
@@ -531,23 +569,23 @@ static void draw_ctl(Layout *L, HDC hdc, Ctl *c, int x, int y, int w, int h, int
 		break;
 	}
 	case CT_CHECK:
-		fill(hdc, x, y, x + w, y + h, RGB(255, 255, 255));
-		frame(hdc, x, y, x + w, y + h, RGB(90, 90, 90));
+		fill(hdc, x, y, x + w, y + h, DK(RGB(255, 255, 255), RGB(40, 42, 48)));
+		frame(hdc, x, y, x + w, y + h, DK(RGB(90, 90, 90), RGB(150, 150, 155)));
 		if (c->checked) {
 			int m = w / 4 + 1;
-			fill(hdc, x + m, y + m, x + w - m, y + h - m, RGB(30, 30, 30));
+			fill(hdc, x + m, y + m, x + w - m, y + h - m, DK(RGB(30, 30, 30), RGB(220, 220, 220)));
 		}
 		break;
 	case CT_RADIO: {
-		HPEN pen = CreatePen(PS_SOLID, 1, RGB(90, 90, 90));
+		HPEN pen = CreatePen(PS_SOLID, 1, DK(RGB(90, 90, 90), RGB(150, 150, 155)));
 		HGDIOBJ op = SelectObject(hdc, pen), ob = SelectObject(hdc, GetStockObject(WHITE_BRUSH));
 		Ellipse(hdc, x, y, x + w, y + h);
 		SelectObject(hdc, op);
 		DeleteObject(pen);
 		if (c->checked) {
 			int m = w / 4 + 1;
-			HBRUSH br = CreateSolidBrush(RGB(0, 90, 220));
-			pen = CreatePen(PS_SOLID, 1, RGB(0, 90, 220));
+			HBRUSH br = CreateSolidBrush(DK(RGB(0, 90, 220), RGB(110, 160, 255)));
+			pen = CreatePen(PS_SOLID, 1, DK(RGB(0, 90, 220), RGB(110, 160, 255)));
 			op = SelectObject(hdc, pen);
 			SelectObject(hdc, br);
 			Ellipse(hdc, x + m, y + m, x + w - m, y + h - m);
@@ -560,8 +598,8 @@ static void draw_ctl(Layout *L, HDC hdc, Ctl *c, int x, int y, int w, int h, int
 	}
 	case CT_SELECT: {
 		const WCHAR *l = (c->nopt > 0 && c->sel < c->nopt) ? c->opt_label[c->sel] : L"";
-		fill(hdc, x, y, x + w, y + h, RGB(245, 245, 245));
-		frame(hdc, x, y, x + w, y + h, pressed ? RGB(0, 90, 220) : RGB(130, 130, 130));
+		fill(hdc, x, y, x + w, y + h, DK(RGB(245, 245, 245), RGB(48, 50, 56)));
+		frame(hdc, x, y, x + w, y + h, pressed ? DK(RGB(0, 90, 220), RGB(110, 160, 255)) : DK(RGB(130, 130, 130), RGB(110, 112, 120)));
 		r.left += SC(3); r.right -= SC(18);
 		DrawTextW(hdc, l, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 		r.left = x + w - SC(16); r.right = x + w;
@@ -569,12 +607,12 @@ static void draw_ctl(Layout *L, HDC hdc, Ctl *c, int x, int y, int w, int h, int
 		break;
 	}
 	case CT_FILE:
-		SetTextColor(hdc, RGB(140, 140, 140));
+		SetTextColor(hdc, DK(RGB(140, 140, 140), RGB(130, 130, 135)));
 		DrawTextW(hdc, L"[\xD30C\xC77C \xCCA8\xBD80 \xBD88\xAC00]", -1, &r, DT_LEFT | DT_SINGLELINE);
 		break;
 	default:
-		fill(hdc, x, y, x + w, y + h, pressed ? RGB(170, 200, 240) : RGB(225, 225, 230));
-		frame(hdc, x, y, x + w, y + h, RGB(120, 120, 130));
+		fill(hdc, x, y, x + w, y + h, pressed ? DK(RGB(170, 200, 240), RGB(70, 95, 140)) : DK(RGB(225, 225, 230), RGB(60, 62, 70)));
+		frame(hdc, x, y, x + w, y + h, DK(RGB(120, 120, 130), RGB(100, 102, 112)));
 		DrawTextW(hdc, c->label ? c->label : L"", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 		break;
 	}
@@ -597,10 +635,10 @@ void layout_paint(Layout *L, HDC hdc, int scrolly, int viewh, int pressed_link, 
 		switch (it->type) {
 		case IT_TEXT: {
 			int st = it->style;
-			COLORREF col = RGB(0, 0, 0);
-			if (st & S_LINK) col = RGB(0, 0, 204);
-			else if (st & S_GRAY) col = RGB(110, 110, 110);
-			if (it->link >= 0 && it->link == pressed_link) fill(hdc, b->x - 1, y - 1, b->x + b->w + 1, y + b->h + 1, RGB(190, 215, 255));
+			COLORREF col = DK(RGB(0, 0, 0), RGB(222, 222, 218));
+			if (st & S_LINK) col = DK(RGB(0, 0, 204), RGB(120, 170, 255));
+			else if (st & S_GRAY) col = DK(RGB(110, 110, 110), RGB(150, 150, 150));
+			if (it->link >= 0 && it->link == pressed_link) fill(hdc, b->x - 1, y - 1, b->x + b->w + 1, y + b->h + 1, DK(RGB(190, 215, 255), RGB(55, 75, 115)));
 			SelectObject(hdc, font_for(st));
 			SetTextColor(hdc, col);
 			ExtTextOutW(hdc, b->x, y, 0, NULL, d->text.p + b->start, b->len, NULL);
@@ -609,14 +647,14 @@ void layout_paint(Layout *L, HDC hdc, int scrolly, int viewh, int pressed_link, 
 			break;
 		}
 		case IT_HR:
-			hline(hdc, b->x, b->x + b->w, y + b->h / 2, RGB(170, 170, 170));
+			hline(hdc, b->x, b->x + b->w, y + b->h / 2, DK(RGB(170, 170, 170), RGB(80, 82, 90)));
 			break;
 		case IT_BULLET: {
 			WCHAR t[16];
 			RECT r;
 			int n;
 			SelectObject(hdc, font_for(1 << S_SZ_SH));
-			SetTextColor(hdc, RGB(60, 60, 60));
+			SetTextColor(hdc, DK(RGB(60, 60, 60), RGB(170, 170, 170)));
 			r.left = b->x; r.right = b->x + b->w; r.top = y; r.bottom = y + b->h;
 			if (it->aux > 0) {
 				n = wsprintfW(t, L"%d.", it->aux);
@@ -624,8 +662,8 @@ void layout_paint(Layout *L, HDC hdc, int scrolly, int viewh, int pressed_link, 
 			} else {
 				int d = b->h / 4 + 1, cx = b->x + b->w - d - SC(3), cy = y + b->h / 2;
 				if (d < 3) d = 3;
-				if (it->aux == -1) fill(hdc, cx, cy - d / 2, cx + d, cy - d / 2 + d, RGB(70, 70, 70));
-				else frame(hdc, cx, cy - d / 2, cx + d, cy - d / 2 + d, RGB(70, 70, 70));
+				if (it->aux == -1) fill(hdc, cx, cy - d / 2, cx + d, cy - d / 2 + d, DK(RGB(70, 70, 70), RGB(170, 170, 170)));
+				else frame(hdc, cx, cy - d / 2, cx + d, cy - d / 2 + d, DK(RGB(70, 70, 70), RGB(170, 170, 170)));
 			}
 			break;
 		}
@@ -640,14 +678,14 @@ void layout_paint(Layout *L, HDC hdc, int scrolly, int viewh, int pressed_link, 
 				if (b->w == im->iw && b->h == im->ih) BitBlt(hdc, b->x, y, b->w, b->h, mdc, 0, 0, SRCCOPY);
 				else StretchBlt(hdc, b->x, y, b->w, b->h, mdc, 0, 0, im->iw, im->ih, SRCCOPY);
 				SelectObject(mdc, old);
-				if (it->link >= 0 && it->link == pressed_link) frame(hdc, b->x, y, b->x + b->w, y + b->h, RGB(0, 90, 255));
+				if (it->link >= 0 && it->link == pressed_link) frame(hdc, b->x, y, b->x + b->w, y + b->h, DK(RGB(0, 90, 255), RGB(110, 160, 255)));
 			} else {
 				RECT r;
 				const WCHAR *alt = d->text.p + im->alt;
 				int n = im->altlen;
-				COLORREF col = it->link >= 0 ? RGB(0, 0, 204) : RGB(110, 110, 110);
-				if (it->link >= 0 && it->link == pressed_link) fill(hdc, b->x, y, b->x + b->w, y + b->h, RGB(190, 215, 255));
-				else if (g_images_on && im->state != 3) fill(hdc, b->x, y, b->x + b->w, y + b->h, RGB(235, 235, 235));
+				COLORREF col = it->link >= 0 ? DK(RGB(0, 0, 204), RGB(120, 170, 255)) : DK(RGB(110, 110, 110), RGB(150, 150, 150));
+				if (it->link >= 0 && it->link == pressed_link) fill(hdc, b->x, y, b->x + b->w, y + b->h, DK(RGB(190, 215, 255), RGB(55, 75, 115)));
+				else if (g_images_on && im->state != 3) fill(hdc, b->x, y, b->x + b->w, y + b->h, DK(RGB(235, 235, 235), RGB(45, 47, 52)));
 				if (g_images_on && im->state != 3 && b->w <= SC(16)) break;
 				r.left = b->x + SC(2); r.right = b->x + b->w - 1; r.top = y + 1; r.bottom = y + b->h;
 				SelectObject(hdc, font_for(0 | S_GRAY));
@@ -655,7 +693,7 @@ void layout_paint(Layout *L, HDC hdc, int scrolly, int viewh, int pressed_link, 
 				if (n == 0) { alt = L"[\xC774\xBBF8\xC9C0]"; n = 5; }
 				if (n > 40) n = 40;
 				DrawTextW(hdc, alt, n, &r, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
-				if (!(g_images_on && im->state != 3)) frame(hdc, b->x, y, b->x + b->w, y + b->h, RGB(200, 200, 200));
+				if (!(g_images_on && im->state != 3)) frame(hdc, b->x, y, b->x + b->w, y + b->h, DK(RGB(200, 200, 200), RGB(80, 82, 90)));
 			}
 			break;
 		}
