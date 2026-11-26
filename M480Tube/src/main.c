@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "3.1"
+#define VERSION   "3.2"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -49,7 +49,7 @@ enum {
 	M_IMPORT, M_UPDATE, M_SELFTEST, M_ABOUT, M_EXIT,
 	M_CLEARHIST, M_SUBMGR,
 	M_SORT0 = 1050, M_SORT1, M_SORT2, M_SORT3, M_SORT4, M_SORT5,
-	C_PLAY = 1100, C_CHANNEL, C_SUB, C_UNSUB, C_DELHIST, C_MGR_UNSUB
+	C_PLAY = 1100, C_CHANNEL, C_SUB, C_UNSUB, C_DELHIST, C_MGR_UNSUB, C_FROMSTART
 };
 
 /* ---------------- theme ---------------- */
@@ -355,6 +355,93 @@ static void hist_field(FILE *f, const char *s)
 	/* tabs / newlines would break the line format */
 	for (; s && *s; s++) fputc((*s == '\t' || *s == '\r' || *s == '\n') ? ' ' : *s, f);
 	fputc('\t', f);
+}
+
+/* ---------------- continue watching: where each video was left ---------------- */
+#define RESUME_MAX 300
+typedef struct { char id[16]; long pos, dur; } Resume;   /* ms; index 0 = most recent */
+static Resume g_resume[RESUME_MAX];
+static int g_nresume;
+
+static void resume_save(void)
+{
+	WCHAR p[MAX_PATH];
+	FILE *f;
+	int i;
+	app_path(p, L"m480tube_resume.txt");
+	f = _wfopen(p, L"wb");
+	if (!f) return;
+	for (i = 0; i < g_nresume; i++) fprintf(f, "%s\t%ld\t%ld\r\n", g_resume[i].id, g_resume[i].pos, g_resume[i].dur);
+	fclose(f);
+}
+
+static void resume_load(void)
+{
+	WCHAR p[MAX_PATH];
+	FILE *f;
+	char line[128];
+	app_path(p, L"m480tube_resume.txt");
+	f = _wfopen(p, L"rb");
+	if (!f) return;
+	while (g_nresume < RESUME_MAX && fgets(line, sizeof line, f)) {
+		char id[16];
+		long pos = 0, dur = 0;
+		if (sscanf(line, "%15[^\t]\t%ld\t%ld", id, &pos, &dur) >= 2 && pos > 0) {
+			strcpy(g_resume[g_nresume].id, id);
+			g_resume[g_nresume].pos = pos;
+			g_resume[g_nresume].dur = dur;
+			g_nresume++;
+		}
+	}
+	fclose(f);
+}
+
+static int resume_find(const char *id)
+{
+	int i;
+	if (!id || !id[0]) return -1;
+	for (i = 0; i < g_nresume; i++) if (!strcmp(g_resume[i].id, id)) return i;
+	return -1;
+}
+
+static void resume_forget(const char *id)
+{
+	int i = resume_find(id);
+	if (i < 0) return;
+	memmove(&g_resume[i], &g_resume[i + 1], (g_nresume - i - 1) * sizeof(Resume));
+	g_nresume--;
+}
+
+/* remember pos for id; finished or barely started videos are forgotten */
+static void resume_set(const char *id, long pos, long dur)
+{
+	int i;
+	if (!id || !id[0]) return;
+	if (pos < 10000 || (dur > 0 && pos > dur - 15000)) { resume_forget(id); return; }
+	i = resume_find(id);
+	if (i < 0) i = g_nresume < RESUME_MAX ? g_nresume++ : RESUME_MAX - 1;
+	memmove(&g_resume[1], &g_resume[0], i * sizeof(Resume));
+	strcpy(g_resume[0].id, id);
+	g_resume[0].pos = pos;
+	g_resume[0].dur = dur;
+}
+
+/* 0..1000 watched, -1 none (red bar on thumbnails) */
+static int resume_permille(const YtItem *it)
+{
+	int i = resume_find(it->id);
+	if (i < 0 || g_resume[i].dur <= 0) return -1;
+	return (int)((double)g_resume[i].pos * 1000 / g_resume[i].dur);
+}
+
+static void fill(HDC dc, int l, int t, int r, int b, COLORREF c);
+static void draw_progress(HDC dc, const YtItem *it, int x, int y, int w, int h)
+{
+	int pm = resume_permille(it);
+	if (pm < 0) return;
+	if (pm > 1000) pm = 1000;
+	fill(dc, x, y + h - 3, x + w, y + h, RGB(90, 90, 90));
+	fill(dc, x, y + h - 3, x + w * pm / 1000, y + h, RGB(230, 33, 23));
 }
 
 static void hist_save(void)
@@ -1294,10 +1381,13 @@ static void toggle_sub(const char *chid, const char *name)
 typedef struct {
 	char id[16];
 	int quality;
+	int from_start;
 	YtStreams s;
 	int ok;
 	NetCtl ctl;
 } StreamJob;
+static char g_play_id[16];      /* video in the player, for the resume table */
+static DWORD g_resume_tick;
 
 static DWORD WINAPI streams_thread(LPVOID arg)
 {
@@ -1307,7 +1397,9 @@ static DWORD WINAPI streams_thread(LPVOID arg)
 	return 0;
 }
 
-static void open_video(int idx)
+static void open_video_ex(int idx, int from_start);
+static void open_video(int idx) { open_video_ex(idx, 0); }
+static void open_video_ex(int idx, int from_start)
 {
 	StreamJob *j;
 	HANDLE th;
@@ -1316,6 +1408,7 @@ static void open_video(int idx)
 	j = (StreamJob *)calloc(1, sizeof(StreamJob));
 	strcpy(j->id, v->list.items[idx].id);
 	j->quality = g_quality;
+	j->from_start = from_start;
 	{
 		/* copy first: adding may reorder the list we are reading from */
 		YtItem copy = v->list.items[idx];
@@ -1362,7 +1455,13 @@ static void on_streams(StreamJob *j)
 		if (h) {
 			g_play_hwnd = h;
 			fullscreen(h, 1);
-			g_player = player_open(h, &j->s, g_start_ori, g_stats);
+			long start = 0;
+			int ri = resume_find(j->id);
+			if (ri >= 0 && !j->from_start) start = g_resume[ri].pos - 3000;   /* a little before where it was left */
+			if (start < 0) start = 0;
+			strcpy(g_play_id, j->id);
+			g_resume_tick = GetTickCount();
+			g_player = player_open(h, &j->s, g_start_ori, g_stats, start);
 			SetTimer(h, TM_PLAYER, 250, NULL);
 			SetForegroundWindow(h);
 			status_set("");
@@ -1378,6 +1477,11 @@ static void close_player(void)
 		HWND h = g_play_hwnd;
 		KillTimer(h, TM_PLAYER);
 		if (g_player) {
+			int st = player_state(g_player);
+			if (st == PS_ENDED) resume_forget(g_play_id);
+			else if (st == PS_PLAYING || st == PS_PAUSED || st == PS_BUFFERING)
+				resume_set(g_play_id, player_position(g_player), player_duration(g_player));
+			resume_save();
 			g_start_ori = player_orientation(g_player);
 			settings_save();
 			player_close(g_player);
@@ -1426,7 +1530,18 @@ static LRESULT CALLBACK play_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		if (g_player) player_key(g_player, (int)w);
 		return 0;
 	case WM_TIMER:
-		if (g_player) player_tick(g_player);
+		if (g_player) {
+			player_tick(g_player);
+			/* note the position now and then, in case the phone dies mid-video */
+			if (GetTickCount() - g_resume_tick > 30000) {
+				int st = player_state(g_player);
+				g_resume_tick = GetTickCount();
+				if (st == PS_PLAYING || st == PS_PAUSED) {
+					resume_set(g_play_id, player_position(g_player), player_duration(g_player));
+					resume_save();
+				}
+			}
+		}
 		return 0;
 	case WM_CLOSE:
 		close_player();
@@ -1565,7 +1680,8 @@ static void paint_list(HDC dc, int w, int h)
 			GDIFLUSH();
 			px = tc_get(it->id);
 			if (px) blit_thumb(px, tx, ty, tw, th);
-			if (it->length) draw_length_badge(g_bbdc, it->length, tx + tw, ty + th);
+			if (it->length) draw_length_badge(g_bbdc, it->length, tx + tw, ty + th - 3);
+			draw_progress(g_bbdc, it, tx, ty, tw, th);
 			SelectObject(g_bbdc, g_fontb);
 			SetTextColor(g_bbdc, T->fg);
 			SetRect(&r, tx, ty + th + 3, tx + tw, ty + th + 3 + 30);
@@ -1588,7 +1704,8 @@ static void paint_list(HDC dc, int w, int h)
 			GDIFLUSH();
 			px = tc_get(it->id);
 			if (px) blit_thumb(px, 4, y + 5, LTW, LTH);
-			if (it->length) draw_length_badge(g_bbdc, it->length, 4 + LTW, y + 5 + LTH);
+			if (it->length) draw_length_badge(g_bbdc, it->length, 4 + LTW, y + 5 + LTH - 3);
+			draw_progress(g_bbdc, it, 4, y + 5, LTW, LTH);
 			SelectObject(g_bbdc, g_fontb);
 			SetTextColor(g_bbdc, T->fg);
 			SetRect(&r, LTW + 10, y + 3, w - 3, y + 3 + 32);
@@ -1837,7 +1954,10 @@ static void item_menu(int idx, int x, int y)
 	if (idx < 0 || idx >= v->list.n) return;
 	it = &v->list.items[idx];
 	m = CreatePopupMenu();
-	AppendMenuW(m, MF_STRING, C_PLAY, L"재생");
+	if (resume_find(it->id) >= 0) {
+		AppendMenuW(m, MF_STRING, C_PLAY, L"이어서 재생");
+		AppendMenuW(m, MF_STRING, C_FROMSTART, L"처음부터 재생");
+	} else AppendMenuW(m, MF_STRING, C_PLAY, L"재생");
 	if (v->kind == V_HIST) AppendMenuW(m, MF_STRING, C_DELHIST, L"기록에서 삭제");
 	if (it->chid[0]) {
 		if (v->kind != V_CHANNEL) AppendMenuW(m, MF_STRING, C_CHANNEL, L"채널 보기");
@@ -2374,6 +2494,9 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 				InvalidateRect(h, NULL, FALSE);
 			}
 			return 0;
+		case C_FROMSTART:
+			open_video_ex(g_ctx_idx, 1);
+			return 0;
 		case C_PLAY:
 			if (cur() == &g_vmgr) { mgr_toggle(g_ctx_idx); return 0; }
 			open_video(g_ctx_idx);
@@ -2696,6 +2819,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE hp, LPWSTR cmd, int show)
 	g_vhist.kind = V_HIST;
 	g_vhist.uid = g_next_uid++;
 	hist_load();
+	resume_load();
 	feed_load();
 	g_tab = g_vhist.list.n ? 2 : 0;   /* open on the watch history when there is one */
 

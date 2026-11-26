@@ -13,7 +13,10 @@ enum { ORI_PORTRAIT, ORI_LAND_LEFT, ORI_LAND_RIGHT };
 enum { TAP_NONE, TAP_BACK };
 
 /* takes ownership of nothing; copies what it needs from s */
-Player *player_open(HWND hwnd, const YtStreams *s, int orientation, int show_stats);
+Player *player_open(HWND hwnd, const YtStreams *s, int orientation, int show_stats, long start_ms);
+long    player_position(Player *p);         /* ms */
+long    player_duration(Player *p);         /* ms, 0 unknown */
+int     player_state(Player *p);
 void    player_close(Player *p);
 void    player_paint(Player *p, HDC dc);       /* WM_PAINT */
 void    player_resize(Player *p);              /* WM_SIZE */

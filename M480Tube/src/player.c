@@ -435,6 +435,7 @@ struct Player {
 	volatile int state;
 	char msg[1100];
 	volatile int paused;
+	long resume_note;             /* >0: show 'resumed from' once playback starts */
 	volatile int bg;              /* screen off: audio only, video decoding stopped */
 	DWORD idle_tick;
 	volatile LONG seek_gen;
@@ -1556,7 +1557,7 @@ static void log_cb(void *avcl, int level, const char *fmt, va_list vl)
 	tube_log("ff: %s", line);
 }
 
-Player *player_open(HWND hwnd, const YtStreams *s, int orientation, int show_stats)
+Player *player_open(HWND hwnd, const YtStreams *s, int orientation, int show_stats, long start_ms)
 {
 	Player *p = (Player *)calloc(1, sizeof(Player));
 	LOGFONTW lf;
@@ -1590,7 +1591,10 @@ Player *player_open(HWND hwnd, const YtStreams *s, int orientation, int show_sta
 	p->ovl_tick = GetTickCount();
 	p->ftick = GetTickCount();
 	p->seek_gen = 1;
-	p->seek_ms = 0;
+	if (start_ms < 0 || (s->dur_ms > 0 && start_ms > s->dur_ms - 5000)) start_ms = 0;
+	p->seek_ms = start_ms;        /* both decoder threads start with a seek to here */
+	p->abase_ms = start_ms;
+	p->resume_note = start_ms;
 	memset(&lf, 0, sizeof lf);
 	lf.lfHeight = -13;
 	lf.lfQuality = 5; /* CLEARTYPE_QUALITY */
@@ -1614,6 +1618,11 @@ Player *player_open(HWND hwnd, const YtStreams *s, int orientation, int show_sta
 	SetThreadPriority(p->ath, THREAD_PRIORITY_ABOVE_NORMAL);
 	return p;
 }
+
+/* where playback is (ms) and how long the video is, for 'continue watching' */
+long player_position(Player *p) { return p ? clock_ms(p) : 0; }
+long player_duration(Player *p) { return p ? p->dur_ms : 0; }
+int  player_state(Player *p) { return p ? p->state : PS_ERROR; }
 
 void player_close(Player *p)
 {
@@ -1815,6 +1824,16 @@ void player_tick(Player *p)
 #endif
 	}
 	if (p->bg) return;
+	if (p->resume_note > 0 && p->state == PS_PLAYING) {
+		long s = p->resume_note / 1000;
+		EnterCriticalSection(&p->cs);
+		if (s >= 3600) _snprintf(p->toast, sizeof p->toast, "%ld:%02ld:%02ld 부터 이어서 재생", s / 3600, s / 60 % 60, s % 60);
+		else _snprintf(p->toast, sizeof p->toast, "%ld:%02ld 부터 이어서 재생", s / 60, s % 60);
+		p->toast[sizeof p->toast - 1] = 0;
+		p->toast_tick = now;
+		LeaveCriticalSection(&p->cs);
+		p->resume_note = 0;
+	}
 	if (now - p->ftick >= 1000) {
 		p->fps = p->fcount * 1000 / (int)(now - p->ftick);
 		p->fcount = 0;
