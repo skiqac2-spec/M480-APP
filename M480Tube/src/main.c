@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "3.0"
+#define VERSION   "3.1"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -136,6 +136,10 @@ static int g_bbw, g_bbh, g_bbstride;
 
 /* touch */
 static int g_down, g_dragging, g_down_y, g_down_x, g_last_y, g_down_scroll;
+static int g_sbdrag, g_sboff;   /* dragging the scroll handle on the right */
+static int g_nofire;            /* this touch stopped a fling: don't open anything */
+#define SB_W 30                 /* scroll handle width (touch area) */
+#define SB_TH 52                /* scroll handle height */
 static DWORD g_last_t;
 static int g_vel;
 static int g_pressed = -1, g_pressed_ch;
@@ -1602,12 +1606,21 @@ static void paint_list(HDC dc, int w, int h)
 	}
 	LeaveCriticalSection(&g_lcs);
 	{
+		/* scroll handle on the right: drag it to move through the list without touching videos */
 		int chh = content_height(v);
-		if (chh > h) {
-			int bh = h * h / chh, by;
-			if (bh < 16) bh = 16;
-			by = (int)((long)v->scroll * (h - bh) / (chh - h));
-			fill(g_bbdc, w - 4, by, w - 1, by + bh, T->sub);
+		if (chh > h && h > SB_TH) {
+			int by = (int)((long)v->scroll * (h - SB_TH) / (chh - h));
+			int x0 = w - SB_W + 3, x1 = w - 2, cx = (x0 + x1) / 2, k;
+			COLORREF hc = g_sbdrag ? T->barbtn : T->ph;
+			fill(g_bbdc, w - 3, 0, w - 1, h, T->sep);                    /* track */
+			fill(g_bbdc, x0 - 1, by - 1, x1 + 1, by + SB_TH + 1, T->sep); /* border */
+			fill(g_bbdc, x0, by, x1, by + SB_TH, hc);
+			for (k = 0; k < 6; k++) {                                     /* up / down arrows */
+				fill(g_bbdc, cx - k, by + 8 + k, cx + k + 1, by + 9 + k, T->fg);
+				fill(g_bbdc, cx - k, by + SB_TH - 9 - k, cx + k + 1, by + SB_TH - 8 - k, T->fg);
+			}
+			fill(g_bbdc, x0 + 6, by + SB_TH / 2 - 3, x1 - 6, by + SB_TH / 2 - 2, T->fg);  /* grip */
+			fill(g_bbdc, x0 + 6, by + SB_TH / 2 + 1, x1 - 6, by + SB_TH / 2 + 2, T->fg);
 		}
 	}
 	BitBlt(dc, 0, content_top(), w, h, g_bbdc, 0, 0, SRCCOPY);
@@ -1721,7 +1734,7 @@ static void paint_tabbar(HDC dc, int w)
 			int narrow = rr.right - rr.left < 50;
 			draw_btn(dc, &mr, "관리", 0);
 			SetTextColor(dc, T->morefg);
-			text_u8(dc, v->busy ? (narrow ? "..." : "불러오는 중") : (narrow ? "갱신" : "새로고침"), &rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			text_u8(dc, v->busy ? (narrow ? "..." : "로딩 중") : (narrow ? "갱신" : "새로고침"), &rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 		}
 	}
 }
@@ -2183,25 +2196,57 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		}
 		SetFocus(h);
 		sip_show(0);
+		/* a touch that stops a moving list only stops it */
+		g_nofire = g_vel != 0;
 		KillTimer(h, TM_KINETIC);
 		g_vel = 0;
+		{
+			View *v = cur();
+			int lh = list_height(), chh = content_height(v);
+			if (x >= cr.right - SB_W && chh > lh && lh > SB_TH) {
+				int ly = y - content_top();
+				int by = (int)((long)v->scroll * (lh - SB_TH) / (chh - lh));
+				g_sbdrag = 1;
+				g_sboff = (ly >= by && ly < by + SB_TH) ? ly - by : SB_TH / 2;   /* tap the track: jump there */
+				g_down = 0;
+				g_pressed = -1;
+				SetCapture(h);
+				if (g_sboff == SB_TH / 2 && !(ly >= by && ly < by + SB_TH)) {
+					v->scroll = (int)((long)(ly - g_sboff) * (chh - lh) / (lh - SB_TH));
+					clamp_scroll();
+				}
+				list_invalidate();
+				return 0;
+			}
+		}
 		g_down = 1;
 		g_dragging = 0;
 		g_down_x = x;
 		g_down_y = g_last_y = y;
 		g_last_t = GetTickCount();
 		g_down_scroll = cur()->scroll;
-		g_pressed = item_at(x, y, &g_pressed_ch);
+		g_pressed = g_nofire ? -1 : item_at(x, y, &g_pressed_ch);
 		SetCapture(h);
-		SetTimer(h, TM_HOLD, 650, NULL);
+		if (!g_nofire) SetTimer(h, TM_HOLD, 650, NULL);
 		list_invalidate();
 		return 0;
 	}
 	case WM_MOUSEMOVE:
+		if (g_sbdrag) {
+			View *v = cur();
+			int y = (short)HIWORD(l), lh = list_height(), chh = content_height(v);
+			if (chh > lh && lh > SB_TH) {
+				v->scroll = (int)((long)(y - content_top() - g_sboff) * (chh - lh) / (lh - SB_TH));
+				clamp_scroll();
+				list_invalidate();
+			}
+			return 0;
+		}
 		if (g_down) {
-			int y = (short)HIWORD(l);
+			int x = (short)LOWORD(l), y = (short)HIWORD(l);
 			DWORD t = GetTickCount();
-			if (!g_dragging && abs(y - g_down_y) > 8) { g_dragging = 1; g_pressed = -1; KillTimer(h, TM_HOLD); }
+			/* any real movement means scrolling, never a tap */
+			if (!g_dragging && (abs(y - g_down_y) > 6 || abs(x - g_down_x) > 10)) { g_dragging = 1; g_pressed = -1; KillTimer(h, TM_HOLD); }
 			if (g_dragging) {
 				int dt = (int)(t - g_last_t);
 				if (dt > 0) g_vel = (g_last_y - y) * 16 * 25 / dt;
@@ -2215,13 +2260,20 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		return 0;
 	case WM_LBUTTONUP:
 		KillTimer(h, TM_HOLD);
+		if (g_sbdrag) {
+			g_sbdrag = 0;
+			ReleaseCapture();
+			maybe_load_more();
+			list_invalidate();
+			return 0;
+		}
 		if (g_down) {
 			int x = (short)LOWORD(l), y = (short)HIWORD(l);
 			g_down = 0;
 			ReleaseCapture();
 			if (!g_dragging) {
 				int ch, idx = item_at(x, y, &ch);
-				if (idx >= 0 && idx == g_pressed) { g_pressed = -1; activate_item(idx, ch); }
+				if (idx >= 0 && idx == g_pressed && !g_nofire) { g_pressed = -1; activate_item(idx, ch); }
 			} else if (abs(g_vel) > 24 && GetTickCount() - g_last_t < 100) {
 				SetTimer(h, TM_KINETIC, 25, NULL);
 			} else maybe_load_more();
