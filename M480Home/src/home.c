@@ -33,7 +33,7 @@
 
 #define APP_CLASS L"M480HomeWnd"
 #define APP_TITLE L"M480 홈"
-#define APP_VER   L"1.3"
+#define APP_VER   L"1.4"
 
 #ifndef VK_OFF
 #define VK_OFF 0xDF
@@ -181,6 +181,22 @@ typedef BOOL (WINAPI *PFN_FullScreen)(HWND, DWORD);
 static PFN_FullScreen pFullScreen;
 static HWND g_sipHidden;    /* 우리가 숨긴 키보드 단추 창 */
 
+/* 1.4: 전원 알림 — 화면이 꺼져 있거나 막 깨어난 순간에는 일을 쉼
+ *  (깨어나는 순간 배터리·무선 상태를 한꺼번에 읽으면 전력이 몰려
+ *   낡은 배터리에서 전원이 나갈 수 있음) */
+typedef HANDLE (WINAPI *PFN_CreateMQ)(LPCWSTR, void *);
+typedef BOOL   (WINAPI *PFN_ReadMQ)(HANDLE, LPVOID, DWORD, LPDWORD, DWORD, DWORD *);
+typedef HANDLE (WINAPI *PFN_ReqPN)(HANDLE, DWORD);
+typedef DWORD  (WINAPI *PFN_SetPS)(LPCWSTR, DWORD, DWORD);
+static PFN_CreateMQ pCreateMQ;
+static PFN_ReadMQ pReadMQ;
+static PFN_ReqPN pReqPN;
+static PFN_SetPS pSetPS;
+#define WM_POWEREV   (WM_APP + 21)
+#define WAKE_QUIET_MS 3000
+static int g_quiet;          /* 1 = 화면 꺼짐 / 막 깨어남: 상태 읽기 쉼 */
+static int g_wakePending;    /* 다시 시작 타이머(9)가 걸려 있음 */
+
 static void load_funcs(void)
 {
     HMODULE h = LoadLibraryW(L"coredll.dll");
@@ -189,6 +205,10 @@ static void load_funcs(void)
     pShellEx = (PFN_ShellEx)GetProcAddressW(h, L"ShellExecuteEx");
     pFileInfo = (PFN_FileInfo)GetProcAddressW(h, L"SHGetFileInfo");
     pSpecial = (PFN_Special)GetProcAddressW(h, L"SHGetSpecialFolderPath");
+    pCreateMQ = (PFN_CreateMQ)GetProcAddressW(h, L"CreateMsgQueue");
+    pReadMQ = (PFN_ReadMQ)GetProcAddressW(h, L"ReadMsgQueue");
+    pReqPN = (PFN_ReqPN)GetProcAddressW(h, L"RequestPowerNotifications");
+    pSetPS = (PFN_SetPS)GetProcAddressW(h, L"SetSystemPowerState");
     h = LoadLibraryW(L"aygshell.dll");
     if (h) pFullScreen = (PFN_FullScreen)GetProcAddressW(h, L"SHFullScreen");
 }
@@ -811,7 +831,7 @@ static void read_status(void)
     if (pPowerEx) {
         MyPowerEx ps;
         memset(&ps, 0, sizeof(ps));
-        if (pPowerEx(&ps, TRUE)) {
+        if (pPowerEx(&ps, FALSE)) {
             if (ps.BatteryLifePercent <= 100) g_batt = ps.BatteryLifePercent;
             g_charging = ps.ACLineStatus == 1;
         }
@@ -1009,8 +1029,67 @@ static void quick_menu(int which)
 
 static void screen_off(void)
 {
+    /* 1.4: 전원 키를 흉내 내면 기기에 따라 '길게 누름(전원 끄기)'으로 잘못 받을 수 있어
+     *      정식 잠자기 요청을 먼저 씀 */
+    if (pSetPS && pSetPS(NULL, 0x00200000 /* POWER_STATE_SUSPEND */, 0x00001000 /* POWER_FORCE */) == ERROR_SUCCESS)
+        return;
     keybd_event(VK_OFF, 0, KEYEVENTF_SILENT, 0);
     keybd_event(VK_OFF, 0, KEYEVENTF_SILENT | KEYEVENTF_KEYUP, 0);
+}
+
+static DWORD WINAPI power_thread(LPVOID arg)
+{
+    HANDLE q = (HANDLE)arg;
+    BYTE buf[256];
+    for (;;) {
+        DWORD rd = 0, fl = 0;
+        if (WaitForSingleObject(q, INFINITE) != WAIT_OBJECT_0) break;
+        if (pReadMQ(q, buf, sizeof(buf), &rd, 0, &fl) && rd >= 8)
+            PostMessageW(g_hwnd, WM_POWEREV, ((DWORD *)buf)[0], ((DWORD *)buf)[1]);
+    }
+    return 0;
+}
+
+static void power_init(void)
+{
+    DWORD o[5];
+    HANDLE q, t;
+    if (!pCreateMQ || !pReadMQ || !pReqPN) return;
+    o[0] = sizeof(o); o[1] = 0; o[2] = 0; o[3] = 256; o[4] = TRUE;
+    q = pCreateMQ(NULL, o);
+    if (!q || !pReqPN(q, 0xFFFFFFFF)) return;
+    t = CreateThread(NULL, 0, power_thread, q, 0, NULL);
+    if (t) CloseHandle(t);
+}
+
+/* 화면 꺼짐 → 시계 타이머까지 멈춤 / 켜짐 → 3초 쉰 뒤 다시 시작 */
+static void on_power(DWORD msg, DWORD fl)
+{
+    if (msg == 0x1 /* PBT_TRANSITION */) {
+        if (fl & (0x00200000 | 0x00400000 | 0x00020000)) {   /* 잠듦 / 화면 꺼짐 / 끄기 */
+            g_quiet = 1;
+            KillTimer(g_hwnd, 1);
+            KillTimer(g_hwnd, 5);
+            KillTimer(g_hwnd, 7);
+            return;
+        }
+        if (!(fl & (0x00010000 | 0x02000000))) return;      /* 켜짐 / 화면 켜짐 */
+    } else if (msg != 0x2 /* PBT_RESUME */) {
+        return;
+    }
+    g_quiet = 1;
+    KillTimer(g_hwnd, 1);
+    g_wakePending = 1;
+    SetTimer(g_hwnd, 9, WAKE_QUIET_MS, NULL);
+}
+
+/* 켜짐 알림을 놓쳐도 누르거나 앞으로 나오면 다시 시작 */
+static void quiet_nudge(void)
+{
+    if (g_quiet && !g_wakePending) {
+        g_wakePending = 1;
+        SetTimer(g_hwnd, 9, WAKE_QUIET_MS, NULL);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -2442,7 +2521,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE:
         g_hwnd = hwnd;
-        SetTimer(hwnd, 1, 500, NULL);
+        SetTimer(hwnd, 1, 1000, NULL);
         return 0;
     case WM_SIZE:
         W = LOWORD(lp); H = HIWORD(lp);
@@ -2465,12 +2544,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             SYSTEMTIME st;
             watch_today();
             GetLocalTime(&st);
-            if (++tick % 10 == 0) {          /* 5초마다 배터리·인터넷·실행 중 */
+            if (g_quiet) return 0;
+            if (++tick % 10 == 0) {          /* 10초마다 배터리·인터넷·실행 중 (무선은 30초마다) */
                 int b = g_batt, c = g_charging, n = g_net, r = g_runN;
                 int wf = g_wifi, bt = g_bt;
                 read_status();
                 if (GetForegroundWindow() == g_hwnd) {
-                    radio_read();
+                    if (tick % 30 == 0) radio_read();
                     if (g_scr != SCR_RUN) scan_running();
                 }
                 if (b != g_batt || c != g_charging || n != g_net || r != g_runN || wf != g_wifi || bt != g_bt) redraw();
@@ -2489,41 +2569,60 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_dragging && g_dx < S(18) && g_page > 0) { g_page--; g_hover = pos_from_xy(g_dx, g_dy); redraw(); }
             else if (g_dragging && g_dx > W - S(18) && g_page < home_pages() - 1) { g_page++; g_hover = pos_from_xy(g_dx, g_dy); redraw(); }
             else KillTimer(hwnd, 6);
+        } else if (wp == 9) {
+            /* 깨어나고 3초 지남: 이제 천천히 다시 읽기 */
+            KillTimer(hwnd, 9);
+            g_quiet = 0;
+            g_wakePending = 0;
+            SetTimer(hwnd, 1, 1000, NULL);
+            read_status();
+            redraw();
+            SetTimer(hwnd, 7, 1500, NULL);
+            SetTimer(hwnd, 5, 2500, NULL);
         } else if (wp == 8) {
             KillTimer(hwnd, 8);
             if (GetForegroundWindow() == hwnd) sip_button(1);
         } else if (wp == 7) {
             KillTimer(hwnd, 7);
+            if (g_quiet) return 0;
             read_status();
             radio_read();
             redraw();
         } else if (wp == 5) {
             KillTimer(hwnd, 5);
+            if (g_quiet) return 0;
             scan_running();
             redraw();
         }
         return 0;
     case WM_ACTIVATE:
         if (LOWORD(wp) != WA_INACTIVE) {
+            quiet_nudge();
             sip_button(1);
             SetTimer(hwnd, 8, 300, NULL);   /* 셸이 늦게 다시 띄우는 경우 한 번 더 */
             fit_window();
             read_status();
-            radio_read();
-            scan_running();
             redraw();
+            if (!g_quiet) {
+                SetTimer(hwnd, 7, 800, NULL);    /* 무선 상태 */
+                SetTimer(hwnd, 5, 1200, NULL);   /* 실행 중 목록 */
+            }
         } else {
             KillTimer(hwnd, 8);
             sip_button(0);
         }
         break;
+    case WM_POWEREV:
+        on_power((DWORD)wp, (DWORD)lp);
+        return 0;
     case WM_SETTINGCHANGE:
         fit_window();
         break;
-    case WM_LBUTTONDOWN: on_down((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
+    case WM_LBUTTONDOWN: quiet_nudge(); on_down((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
     case WM_MOUSEMOVE:   on_move((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
     case WM_LBUTTONUP:   on_up((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
     case WM_KEYDOWN:
+        quiet_nudge();
         if (on_key(wp)) return 0;
         break;
     case WM_CLOSE:
@@ -2624,6 +2723,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
     UpdateWindow(g_hwnd);
     sip_button(1);
     scan_running();
+    power_init();
 
     while (GetMessageW(&m, NULL, 0, 0)) {
         TranslateMessage(&m);

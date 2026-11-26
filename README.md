@@ -17,6 +17,7 @@ M480Web 브라우저의 **내 파일함**(홈 화면 또는 메뉴 ≡)에서 �
 | `M480Emu/` | 게임 에뮬레이터 모음 (PS1·GBA·패미컴·슈퍼패미컴·게임보이·메가드라이브), 반투명 화면 터치 버튼 |
 | `M480Call/` | 블루투스 핸즈프리 통화 앱 (폰에 연결해 M480으로 걸기·받기·끊기, 0.1 테스트판) |
 | `M480Home/` | 홈 화면 런처 (큰 아이콘·시계·배터리, 전체 앱, 실행 중 앱 닫기, 오늘 화면 대신) |
+| `M480Batt/` | 배터리 진단 (갑자기 꺼짐 원인 판정, 전압·전원 사건 기록, 깨어날 때 전압 하락 측정) |
 | `downloads/` | 휴대폰용 완성 파일 + 파일 목록(files.txt) |
 | `tools/update_manifest.py` | `downloads/files.in` → `files.txt` (크기 자동 기입) |
 
@@ -30,5 +31,6 @@ M480Web 브라우저의 **내 파일함**(홈 화면 또는 메뉴 ≡)에서 �
 - M480Music: `cd M480Music && make` (cegcc 필요) — Actions 탭에서 exe·cab 자동 빌드
 - M480Emu: `cd M480Emu && ./build.sh && ./package.sh` (cegcc 필요, 코어 소스 자동 다운로드) — Actions 탭에서 cab·zip 자동 빌드
 - M480Home: `cd M480Home && make` (cegcc 필요) — Actions 탭에서 exe·cab 자동 빌드
+- M480Batt: `cd M480Batt && make` (cegcc 필요) — Actions 탭에서 exe·cab 자동 빌드
 - M480Call: `cd M480Call && make` (cegcc 필요) — Actions 탭에서 exe·cab 자동 빌드
 - M480Comic: `cd M480Comic && make ce` (cegcc 필요, `../M480Web` 소스 사용), PC 테스트판 `make win`
