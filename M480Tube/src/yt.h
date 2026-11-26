@@ -57,7 +57,8 @@ int  yt_search(const char *query, const char *cont, YtList *out, NetCtl *ctl);
 void yt_list_free(YtList *l);
 
 /* channel "Videos" tab (cont = NULL for the first page); *name gets the channel title */
-int  yt_channel(const char *chid, const char *cont, YtList *out, char **name, NetCtl *ctl);
+/* tab: 0 videos, 1 past live streams (live-now / upcoming left out) */
+int  yt_channel(const char *chid, const char *cont, int tab, YtList *out, char **name, NetCtl *ctl);
 /* latest ~15 uploads of a channel from its public RSS feed (with publish times) */
 int  yt_rss(const char *chid, YtList *out, char **name, NetCtl *ctl);
 int  yt_parse_channel(const char *body, int len, YtList *out, char **name);

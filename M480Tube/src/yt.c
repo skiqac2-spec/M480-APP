@@ -33,6 +33,7 @@ static int g_vpref[3][16], g_nvpref[3];
 static int g_apref[16], g_napref;
 static char g_hl[8], g_gl[8];
 static char g_channel_params[80] = "EgZ2aWRlb3PyBgQKAjoA";
+static char g_streams_params[80] = "EgdzdHJlYW1z8gYECgJ6AA%3D%3D";
 static CRITICAL_SECTION g_ycs;
 static int g_ycs_init;
 YtTune g_tune;
@@ -156,6 +157,7 @@ static int apply_config(const char *text)
 			if ((sec == S_SEARCH || sec == S_PLAYER) && cur) client_key(cur, k, v);
 			else if (!strcmp(k, "hl")) CPY(g_hl, v);
 			else if (!strcmp(k, "channel_params")) CPY(g_channel_params, v);
+			else if (!strcmp(k, "streams_params")) CPY(g_streams_params, v);
 			else if (!strcmp(k, "gl")) CPY(g_gl, v);
 			else if (!strcmp(k, "video240")) parse_ints(v, g_vpref[0], &g_nvpref[0], 16);
 			else if (!strcmp(k, "video144")) parse_ints(v, g_vpref[1], &g_nvpref[1], 16);
@@ -464,6 +466,12 @@ static void on_lockup(JNode *v, void *ctx)
 				else it->meta = join_meta(it->meta, s);
 			} else buf_free(&b);
 		}
+		/* channel tabs: "views · date" row followed by a badges row -> it is meta, not the channel */
+		if (it->channel && !it->meta && (strstr(it->channel, "\xEC\xA1\xB0\xED\x9A\x8C\xEC\x88\x98") || strstr(it->channel, " view") ||
+		    strstr(it->channel, "Streamed") || strstr(it->channel, "\xEC\x8A\xA4\xED\x8A\xB8\xEB\xA6\xAC\xEB\xB0\x8D"))) {
+			it->meta = it->channel;
+			it->channel = NULL;
+		}
 	}
 	{
 		JNode *ov = jpath(v, "contentImage.thumbnailViewModel.overlays");
@@ -603,7 +611,7 @@ int yt_parse_channel(const char *body, int len, YtList *out, char **name)
 	return 1;
 }
 
-int yt_channel(const char *chid, const char *cont, YtList *out, char **name, NetCtl *ctl)
+int yt_channel(const char *chid, const char *cont, int tab, YtList *out, char **name, NetCtl *ctl)
 {
 	Client c;
 	Buf body;
@@ -628,7 +636,7 @@ int yt_channel(const char *chid, const char *cont, YtList *out, char **name, Net
 	else {
 		buf_adds(&body, ",\"browseId\":");
 		json_esc(&body, chid);
-		buf_addf(&body, ",\"params\":\"%s\"", g_channel_params);
+		buf_addf(&body, ",\"params\":\"%s\"", tab == 1 ? g_streams_params : g_channel_params);
 	}
 	buf_adds(&body, "}");
 	ok = api_post(&c, url, body.p, body.len, &r, ctl, out->err, sizeof out->err);
@@ -636,7 +644,20 @@ int yt_channel(const char *chid, const char *cont, YtList *out, char **name, Net
 	if (!ok) { http_resp_free(&r); return 0; }
 	ok = yt_parse_channel(r.body.p, r.body.len, out, name);
 	http_resp_free(&r);
-	if (ok && out->n == n0 && !cont) { strcpy(out->err, "이 채널에는 영상이 없습니다"); return 0; }
+	if (ok && tab == 1) {
+		/* keep finished streams only: live-now / upcoming have no "h:mm:ss" length */
+		int i, k = n0;
+		for (i = n0; i < out->n; i++) {
+			YtItem *it = &out->items[i];
+			if (it->length && strchr(it->length, ':')) { if (k != i) out->items[k] = *it; k++; }
+			else { free(it->title); free(it->channel); free(it->length); free(it->meta); }
+		}
+		out->n = k;
+	}
+	if (ok && out->n == n0 && !cont) {
+		strcpy(out->err, tab == 1 ? "지난 라이브 영상이 없습니다" : "이 채널에는 영상이 없습니다");
+		return 0;
+	}
 	return ok;
 }
 

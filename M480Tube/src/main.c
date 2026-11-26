@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "3.2"
+#define VERSION   "3.3"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -79,6 +79,7 @@ typedef struct {
 	char *title;           /* channel name */
 	int scroll;
 	int busy, busy_more;
+	int ctab;              /* channel page: 0 videos, 1 past live streams */
 	int sort;              /* 0 default, 1 newest, 2 oldest, 3 longest, 4 shortest, 5 most viewed */
 	int ord_next;
 	char msg[300];         /* shown when the list is empty */
@@ -623,7 +624,16 @@ static void msgbox_u8(const char *s, UINT flags)
 }
 
 /* ---------------- geometry ---------------- */
-static int content_top(void) { return g_topbar + g_tabbar; }
+static View *cur(void);
+/* channel pages have a second row: [동영상] [지난 라이브] [정렬] */
+static int content_top(void) { return g_topbar + g_tabbar + (cur()->kind == V_CHANNEL ? g_tabbar : 0); }
+static void chan_tab_rects(int w, RECT *vid, RECT *live, RECT *sortr)
+{
+	int y0 = g_topbar + g_tabbar, y1 = y0 + g_tabbar;
+	SetRect(vid, 0, y0, 70, y1);
+	SetRect(live, 70, y0, 160, y1);
+	SetRect(sortr, w - 56, y0, w, y1);
+}
 static int client_w(void) { RECT r; GetClientRect(g_hwnd, &r); return r.right; }
 static int list_height(void)
 {
@@ -930,7 +940,7 @@ static DWORD WINAPI thumb_thread(LPVOID arg)
 /* ---------------- background jobs ---------------- */
 enum { J_SEARCH, J_CHANNEL, J_SUBS };
 typedef struct {
-	int type, uid, more;
+	int type, uid, more, tab;
 	char *query, *cont, *chid;
 	char *name;
 	int ok;
@@ -974,7 +984,7 @@ static DWORD WINAPI feed_worker(LPVOID arg)
 			yt_list_free(&part->items);
 			memset(&part->items, 0, sizeof part->items);
 			if (InterlockedIncrement((LONG *)&fr->fallbacks) > FEED_FALLBACK_MAX ||
-			    !yt_channel(j->subs[i].chid, NULL, &part->items, &nm, &ctl)) InterlockedIncrement((LONG *)&fr->fails);
+			    !yt_channel(j->subs[i].chid, NULL, 0, &part->items, &nm, &ctl)) InterlockedIncrement((LONG *)&fr->fails);
 		}
 		for (k = 0; k < part->items.n; k++) {
 			YtItem *it = &part->items.items[k];
@@ -992,7 +1002,7 @@ static DWORD WINAPI job_thread(LPVOID arg)
 {
 	Job *j = (Job *)arg;
 	if (j->type == J_SEARCH) j->ok = yt_search(j->query, j->cont, &j->res, &j->ctl);
-	else if (j->type == J_CHANNEL) j->ok = yt_channel(j->chid, j->cont, &j->res, &j->name, &j->ctl);
+	else if (j->type == J_CHANNEL) j->ok = yt_channel(j->chid, j->cont, j->tab, &j->res, &j->name, &j->ctl);
 	else {
 		/* subscriptions: several channels at once (each keeps its own connection) */
 		FeedRun fr;
@@ -1065,9 +1075,10 @@ static void load_channel(View *v, int more)
 	j->uid = v->uid;
 	j->more = more;
 	j->chid = xstrdup(v->chid);
+	j->tab = v->ctab;
 	j->cont = more ? xstrdup(v->list.cont) : NULL;
 	if (more) v->busy_more = 1; else v->busy = 1;
-	status_set(more ? "더 불러오는 중..." : "채널 영상을 불러오는 중...");
+	status_set(more ? "더 불러오는 중..." : v->ctab ? "지난 라이브를 불러오는 중..." : "채널 영상을 불러오는 중...");
 	if (!job_start(j)) { v->busy = v->busy_more = 0; job_free(j); }
 	InvalidateRect(g_hwnd, NULL, FALSE);
 }
@@ -1273,7 +1284,7 @@ static void on_job(Job *j)
 			merge_results(v, &j->res, j->type == J_SUBS);
 			v->msg[0] = 0;
 			if (j->type == J_SUBS) _snprintf(s, sizeof s, "구독 채널 %d개 · 영상 %d개%s%s", g_nsubs, v->list.n, j->err[0] ? " · " : "", j->err);
-			else _snprintf(s, sizeof s, "영상 %d개", v->list.n);
+			else _snprintf(s, sizeof s, (v->kind == V_CHANNEL && v->ctab) ? "지난 라이브 %d개" : "영상 %d개", v->list.n);
 			if (v == cur()) status_set(g_tune.notice[0] ? g_tune.notice : s);
 		}
 		if (v == cur()) { clamp_scroll(); InvalidateRect(g_hwnd, NULL, FALSE); }
@@ -1313,6 +1324,22 @@ static void open_channel(const char *chid, const char *name)
 	EnterCriticalSection(&g_lcs);
 	g_chan[g_nchan++] = v;
 	LeaveCriticalSection(&g_lcs);
+	load_channel(v, 0);
+	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static void scroll_top(void);
+/* switch a channel page between its videos and its past live streams */
+static void chan_set_tab(View *v, int t)
+{
+	if (v->ctab == t) { scroll_top(); return; }
+	EnterCriticalSection(&g_lcs);
+	view_clear(v);
+	LeaveCriticalSection(&g_lcs);
+	v->ctab = t;
+	v->uid = g_next_uid++;      /* a still-running load for the other tab is dropped */
+	v->busy = v->busy_more = 0;
+	v->ord_next = 0;
 	load_channel(v, 0);
 	InvalidateRect(g_hwnd, NULL, FALSE);
 }
@@ -1838,6 +1865,17 @@ static void paint_tabbar(HDC dc, int w)
 		fill(dc, c.left + 4, c.top + 3, c.right - 4, c.bottom - 4, subbed ? T->ph : T->barbtn);
 		SetTextColor(dc, subbed ? T->fg : RGB(255, 255, 255));
 		text_u8(dc, subbed ? "구독 중" : "구독", &c, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		{
+			RECT vr, lr, sr;
+			chan_tab_rects(w, &vr, &lr, &sr);
+			fill(dc, 0, vr.top, w, vr.bottom, T->tabbg);
+			fill(dc, 0, vr.bottom - 1, w, vr.bottom, T->sep);
+			SelectObject(dc, g_fontb);
+			draw_tab(dc, &vr, "동영상", v->ctab == 0);
+			draw_tab(dc, &lr, "지난 라이브", v->ctab == 1);
+			SelectObject(dc, g_fonts);
+			draw_btn(dc, &sr, v->sort ? "정렬*" : "정렬", v->sort != 0);
+		}
 	} else {
 		SelectObject(dc, g_fontb);
 		RECT sr, mr, rr;
@@ -2298,6 +2336,12 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 				else if (PtInRect(&c, pt)) mgr_set_all(1);
 				else if (PtInRect(&d, pt)) mgr_set_all(0);
 				else if (PtInRect(&b, pt)) scroll_top();
+			} else if (v->kind == V_CHANNEL && y >= g_topbar + g_tabbar) {
+				RECT vr, lr, sr;
+				chan_tab_rects(cr.right, &vr, &lr, &sr);
+				if (PtInRect(&vr, pt)) chan_set_tab(v, 0);
+				else if (PtInRect(&lr, pt)) chan_set_tab(v, 1);
+				else if (PtInRect(&sr, pt)) sort_menu(sr.right, sr.bottom);
 			} else if (v->kind == V_CHANNEL) {
 				if (PtInRect(&a, pt)) go_back();
 				else if (PtInRect(&c, pt)) toggle_sub(v->chid, v->title);
