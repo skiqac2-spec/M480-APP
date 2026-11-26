@@ -1032,59 +1032,125 @@ static void fmt_size(char *out, long sz)
 	else sprintf(out, "%ld KB", (sz + 1023) / 1024);
 }
 
+/* state of one app (group): 0 not downloaded, 1 partly, 2 up to date, 3 update available */
+static int fb_group_state(int g)
+{
+	int i, n = 0, have = 0, stale = 0;
+	for (i = 0; i < g_nfe; i++) {
+		WCHAR lp[MAX_PATH];
+		long sz;
+		if (g_fe[i].group != g) continue;
+		n++;
+		fb_local_path(i, lp);
+		sz = file_size_w(lp);
+		if (sz >= 0) { have++; if (g_fe[i].size >= 0 && sz != g_fe[i].size) stale++; }
+	}
+	if (!have) return 0;
+	if (stale) return 3;
+	return have == n ? 2 : 1;
+}
+
+static void fb_title(Buf *b, const char *t, int big)
+{
+	/* "M480 뮤직 2.4 (블루투스 잡음 수정 2)" -> bold name + small note */
+	const char *p = strstr(t, " (");
+	if (p && big) {
+		buf_adds(b, "<b>"); { char *x = xstrndup(t, (int)(p - t)); h_esc(b, x); free(x); } buf_adds(b, "</b>");
+		buf_adds(b, "<br><small>"); h_esc(b, p + 1); buf_adds(b, "</small>");
+	} else { buf_adds(b, big ? "<b>" : ""); h_esc(b, t); buf_adds(b, big ? "</b>" : ""); }
+}
+
+/* level 1: list of apps, grouped by state */
 static Doc *files_page(void)
 {
 	Buf b;
 	Doc *d;
-	int g, i;
+	int g, pass, i;
+	static const char *heads[3] = { "업데이트 있음", "받은 앱", "받지 않은 앱" };
+	int *st;
+	buf_init(&b);
+	buf_adds(&b, "<title>내 파일함</title><h2>내 파일함</h2>"
+		"<p><small>앱을 누르면 파일 목록이 나옵니다.</small></p>");
+	if (!g_nfe) buf_adds(&b, "<p>올라온 파일이 없습니다.</p>");
+	st = (int *)malloc((g_nfg + 2) * sizeof(int));
+	for (g = -1; g < g_nfg; g++) st[g + 1] = fb_group_state(g);
+	for (pass = 0; pass < 3; pass++) {
+		int any = 0;
+		for (g = -1; g < g_nfg; g++) {
+			int s1 = st[g + 1], k = pass == 0 ? (s1 == 3) : pass == 1 ? (s1 == 1 || s1 == 2) : (s1 == 0);
+			int nf = 0;
+			for (i = 0; i < g_nfe; i++) if (g_fe[i].group == g) nf++;
+			if (!k || !nf) continue;
+			if (!any) { buf_addf(&b, "<h3>%s</h3><ul>", heads[pass]); any = 1; }
+			buf_addf(&b, "<li><a href=\"about:app?%d\">", g);
+			fb_title(&b, g >= 0 ? g_fg[g].title : "기타", 1);
+			buf_adds(&b, "</a><br><small>");
+			if (s1 == 3) buf_adds(&b, "<b>새 버전 있음</b> · ");
+			else if (s1 == 2) buf_adds(&b, "최신 · ");
+			else if (s1 == 1) buf_adds(&b, "일부 받음 · ");
+			buf_addf(&b, "파일 %d개", nf);
+			if (g >= 0 && g_fg[g].date[0]) { buf_adds(&b, " · "); h_esc(&b, g_fg[g].date); }
+			buf_adds(&b, "</small>");
+		}
+		if (any) buf_adds(&b, "</ul>");
+	}
+	free(st);
+	buf_adds(&b, "<hr><p><a href=\"about:files\">새로고침</a> | <a href=\"about:settings\">파일함 설정</a> | <a href=\"about:home\">홈</a></p>");
+	d = html_parse(b.p, b.len, "about:files", "utf-8", 0);
+	buf_free(&b);
+	return d;
+}
+
+/* level 2: files of one app */
+static Doc *app_page(int g)
+{
+	Buf b;
+	Doc *d;
+	int i, s1 = fb_group_state(g);
+	char url[40];
 	WCHAR root[MAX_PATH];
 	char *rootu;
+	if (g < -1 || g >= g_nfg) return files_page();
 	fb_root(root);
 	rootu = w_to_utf8(root, -1);
 	buf_init(&b);
-	buf_adds(&b, "<title>내 파일함</title><h2>내 파일함</h2>"
-		"<p><small>Claude가 GitHub 저장소(M480-APP)에 올린 파일입니다. 파일을 누르면 받고, "
-		"[전체 받기]는 그 앱에 필요한 파일을 한 번에 받습니다.</small></p>");
-	buf_adds(&b, "<p><small>저장 위치: ");
-	h_esc(&b, rootu);
-	buf_adds(&b, "</small></p>");
-	free(rootu);
-	if (!g_nfe) buf_adds(&b, "<p>올라온 파일이 없습니다.</p>");
-	for (g = -1; g < g_nfg; g++) {
-		int any = 0;
-		for (i = 0; i < g_nfe; i++) if (g_fe[i].group == g) any = 1;
-		if (!any) continue;
-		buf_adds(&b, "<hr><h3>");
-		h_esc(&b, g >= 0 ? g_fg[g].title : "기타");
-		buf_adds(&b, "</h3>");
-		if (g >= 0 && g_fg[g].date[0]) { buf_adds(&b, "<small>업데이트: "); h_esc(&b, g_fg[g].date); buf_adds(&b, "</small><br>"); }
-		buf_addf(&b, "<a href=\"about:getall?%d\"><b>[전체 받기]</b></a><ul>", g);
-		for (i = 0; i < g_nfe; i++) {
-			WCHAR lp[MAX_PATH];
-			long have;
-			char sz[32];
-			const char *name;
-			if (g_fe[i].group != g) continue;
-			fb_local_path(i, lp);
-			have = file_size_w(lp);
-			fmt_size(sz, g_fe[i].size);
-			name = strrchr(g_fe[i].local, '/');
-			name = name ? name + 1 : g_fe[i].local;
-			buf_addf(&b, "<li><a href=\"about:get?%d\">", i);
-			h_esc(&b, name);
-			buf_adds(&b, "</a> <small>(");
-			buf_adds(&b, sz);
-			buf_adds(&b, ")");
-			if (have >= 0 && (g_fe[i].size < 0 || have == g_fe[i].size)) buf_adds(&b, " <b>받음</b>");
-			else if (have >= 0) buf_adds(&b, " <b>새 버전 있음</b>");
-			buf_adds(&b, "</small>");
-			if (g_fe[i].desc[0]) { buf_adds(&b, "<br><small>"); h_esc(&b, g_fe[i].desc); buf_adds(&b, "</small>"); }
-			if (have >= 0) buf_addf(&b, " <small><a href=\"about:open?%d\">[열기]</a></small>", i);
-		}
-		buf_adds(&b, "</ul>");
+	buf_adds(&b, "<title>");
+	h_esc(&b, g >= 0 ? g_fg[g].title : "기타");
+	buf_adds(&b, "</title><p><a href=\"about:files\">◀ 앱 목록</a></p><h3>");
+	fb_title(&b, g >= 0 ? g_fg[g].title : "기타", 1);
+	buf_adds(&b, "</h3><small>");
+	if (g >= 0 && g_fg[g].date[0]) { buf_adds(&b, "업데이트: "); h_esc(&b, g_fg[g].date); buf_adds(&b, "<br>"); }
+	buf_adds(&b, s1 == 3 ? "<b>새 버전이 있습니다</b>" : s1 == 2 ? "최신 버전을 받아 두었습니다" : s1 == 1 ? "일부 파일만 받았습니다" : "아직 받지 않았습니다");
+	buf_adds(&b, "</small><p>");
+	buf_addf(&b, "<a href=\"about:getall?%d\"><b>[%s]</b></a></p><ul>", g, s1 == 3 ? "전체 업데이트 받기" : "전체 받기");
+	for (i = 0; i < g_nfe; i++) {
+		WCHAR lp[MAX_PATH];
+		long have;
+		char sz[32];
+		const char *name;
+		if (g_fe[i].group != g) continue;
+		fb_local_path(i, lp);
+		have = file_size_w(lp);
+		fmt_size(sz, g_fe[i].size);
+		name = strrchr(g_fe[i].local, '/');
+		name = name ? name + 1 : g_fe[i].local;
+		buf_addf(&b, "<li><a href=\"about:get?%d\">", i);
+		h_esc(&b, name);
+		buf_adds(&b, "</a> <small>(");
+		buf_adds(&b, sz);
+		buf_adds(&b, ")");
+		if (have >= 0 && (g_fe[i].size < 0 || have == g_fe[i].size)) buf_adds(&b, " 받음");
+		else if (have >= 0) buf_adds(&b, " <b>새 버전</b>");
+		buf_adds(&b, "</small>");
+		if (have >= 0) buf_addf(&b, " <small><a href=\"about:open?%d\">[열기]</a></small>", i);
+		if (g_fe[i].desc[0]) { buf_adds(&b, "<br><small>"); h_esc(&b, g_fe[i].desc); buf_adds(&b, "</small>"); }
 	}
-	buf_adds(&b, "<hr><p><a href=\"about:files\">새로고침</a> | <a href=\"about:settings\">파일함 설정</a> | <a href=\"about:home\">홈</a></p>");
-	d = html_parse(b.p, b.len, "about:files", "utf-8", 0);
+	buf_adds(&b, "</ul><p><small>저장 위치: ");
+	h_esc(&b, rootu);
+	buf_adds(&b, "</small></p><hr><p><a href=\"about:files\">◀ 앱 목록</a> | <a href=\"about:home\">홈</a></p>");
+	free(rootu);
+	_snprintf(url, sizeof url, "about:app?%d", g);
+	d = html_parse(b.p, b.len, url, "utf-8", 0);
 	buf_free(&b);
 	return d;
 }
@@ -1254,6 +1320,7 @@ static void queue_next(void)
 		g_qn = g_qpos = 0;
 		g_qfail = 0;
 		if (g_doc && !strcmp(g_doc->url, "about:files")) install_doc(files_page(), NAV_RELOAD, NULL);
+		else if (g_doc && !strncmp(g_doc->url, "about:app?", 10)) install_doc(app_page(atoi(g_doc->url + 10)), NAV_RELOAD, NULL);
 		if (n > 1) {
 			sprintf(s, fail ? "%d개 중 %d개 받기 실패" : "%d개 파일 받기 완료", n, fail);
 			status_set(s);
@@ -1396,6 +1463,14 @@ static void navigate(const char *url0, const char *post, int postlen, const char
 		return;
 	}
 	if (!strcmp(url, "about:files")) goto network;
+	if (!strncmp(url, "about:app?", 10)) {
+		int g = atoi(url + 10);
+		free(url);
+		if (!g_nfe) { navigate("about:files", NULL, 0, NULL, mode); return; }   /* list not loaded yet */
+		stop_all();
+		install_doc(app_page(g), mode, NULL);
+		return;
+	}
 	/* about: pages */
 	if (!strncmp(url, "about:", 6)) {
 		stop_all();

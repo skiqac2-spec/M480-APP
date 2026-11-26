@@ -25,10 +25,10 @@ M480Comic/README.txt	4313	사용 설명서
 M480Wipi/M480Wipi.cab	287605	설치 파일 - 누르면 설치
 M480Wipi/M480Wipi.exe	400384	설치 없이 쓰는 실행 파일
 M480Wipi/README.txt	4084	사용 설명서 (게임 넣는 폴더 안내)
-@M480Web	M480Web 웹 브라우저 (TLS 1.2)	2026-11-26 (3) 나무위키 빈 화면(Loading) 해결
-M480Web/M480Web.cab	317541	설치 파일 - 누르면 설치 (설치 중 브라우저가 종료됨)
-M480Web/M480Web.exe	509952	설치 없이 쓰는 실행 파일
-M480Web/README.txt	7757	사용 설명서
+@M480Web	M480Web 웹 브라우저 (TLS 1.2)	2026-11-27 내 파일함 앱별 정리
+M480Web/M480Web.cab	318450	설치 파일 - 누르면 설치 (설치 중 브라우저가 종료됨)
+M480Web/M480Web.exe	512000	설치 없이 쓰는 실행 파일
+M480Web/README.txt	8242	사용 설명서
 @AbyssLabyrinth	심연의 미궁 (1인칭 던전 RPG)	2026-11-23 소프트키 수정
 AbyssLabyrinth/Abyss_WM61.exe	153088	게임 실행 파일
 ../AbyssLabyrinth/data/abyss_mon.dat	48050376	몬스터 그래픽 46MB (exe와 같은 폴더)	AbyssLabyrinth/abyss_mon.dat
