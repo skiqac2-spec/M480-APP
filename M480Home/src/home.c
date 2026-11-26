@@ -33,7 +33,7 @@
 
 #define APP_CLASS L"M480HomeWnd"
 #define APP_TITLE L"M480 홈"
-#define APP_VER   L"1.4"
+#define APP_VER   L"1.4.1"
 
 #ifndef VK_OFF
 #define VK_OFF 0xDF
@@ -1456,14 +1456,15 @@ static void paint_home(void)
                 if (pg == g_page) hit_add(x, y, gw, gh, H_TILE, idx);
             } else if (idx < 0) {
                 int isAdd = pos == freeSlot && !(g_dragging && g_lift == LIFT_ADD);
-                if (pressed(H_EMPTY, pos) || pressed(H_ADDTILE, pos) || (isAdd && g_lift == LIFT_ADD))
+                if (pressed(H_ADDTILE, pos) || (isAdd && g_lift == LIFT_ADD))
                     rrect(x + S(2), y + S(2), gw - S(4), gh - S(4), S(10), C_PRESS);
                 if (isAdd) {
                     frame(bx, by, badge, badge, badge / 4, S(2), g_wall ? C_SUB : C_DIM);
                     glyph_plus(bx + badge / 2, by + badge / 2, badge / 5, g_wall ? C_TEXT : C_SUB);
                     tile_label(x + S(2), by + badge + S(1), gw - S(4), L"앱 추가", g_wall ? C_TEXT : C_SUB);
                 }
-                if (pg == g_page) hit_add(x, y, gw, gh, isAdd ? H_ADDTILE : H_EMPTY, pos);
+                /* 빈칸은 눌러도 아무 일 없음 ('앱 추가' 칸만 앱 목록을 엶) */
+                if (pg == g_page && isAdd) hit_add(x, y, gw, gh, H_ADDTILE, pos);
             }
         }
     }
@@ -2440,7 +2441,8 @@ static int on_key(WPARAM k)
         else if (k == VK_DOWN && g_focus + cols < n) g_focus += cols;
         else if (k == VK_RETURN) {
             int f = fav_at(g_focus);
-            if (f >= 0) activate(H_TILE, f); else activate(H_EMPTY, g_focus);
+            if (f >= 0) activate(H_TILE, f);
+            else if (g_focus == add_pos()) activate(H_ADDTILE, g_focus);
             return 1;
         }
         g_page = g_focus / (cols * rows);
