@@ -1,6 +1,13 @@
 # M480-APP 파일 목록 (M480Web '내 파일함'이 읽음)
 # 형식: @그룹ID<TAB>제목<TAB>날짜  /  파일경로(이 폴더 기준)<TAB>크기(자동)<TAB>설명<TAB>휴대폰에 저장될 경로(생략 가능)
 # files.txt 는 tools/update_manifest.py 가 이 파일로부터 만든다.
+@AbyssPaladin	ABYSS PALADIN (GBA 액션 RPG, M480Emu로 실행)	2026-11-27 3D 성기사·BGM·한글 대화
+AbyssPaladin/act1.gba	1260544	액트 I 게임 파일 (여기서 시작)
+AbyssPaladin/act2.gba	1260544	액트 II 게임 파일 (액트 I 패스워드로 이어 하기)
+AbyssPaladin/act3.gba	1260544	액트 III 게임 파일
+AbyssPaladin/act4.gba	1260544	액트 IV 게임 파일
+AbyssPaladin/act5.gba	1260544	액트 V 게임 파일 (마지막 액트)
+AbyssPaladin/README.txt	1413	사용 설명서 (넣는 법·조작·패스워드)
 @M480Batt	M480 배터리 진단 1.1 (키보드 단추 가림·제목 줄 수정)	2026-11-26
 M480Batt/M480Batt.cab	30536	설치 파일 - 누르면 설치 (설치 후 [자동 켜짐] 권장)
 M480Batt/M480Batt.exe	57344	설치 없이 쓰는 실행 파일
