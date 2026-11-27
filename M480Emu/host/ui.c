@@ -931,15 +931,16 @@ static const unsigned char face_pb[4] = { PB_TRIANGLE, PB_CIRCLE, PB_CROSS, PB_S
 struct ov_run { short y, x, n; unsigned char id; };
 static struct ov_run *ov_runs;
 static int ov_nruns, ov_npix, ov_on, ov_alpha;
-static uint16_t *ov_img, *ov_bg, *ov_last;         /* per run pixel: sprite, saved background, last output */
+static uint16_t *ov_img, *ov_bg, *ov_last, *ov_pre, *ov_pre_lit;
+static void ov_prepare(void);         /* per run pixel: sprite, saved background, last output */
 static int ov_dx, ov_dy, ov_dr;                    /* D-pad centre and radius */
 static int ov_fx[4], ov_fy[4], ov_fr, ov_nface;    /* face buttons */
 static unsigned ov_lit;                            /* bit per OV_* id drawn highlighted */
 
 static void ov_free(void)
 {
-    free(ov_runs); free(ov_img); free(ov_bg); free(ov_last);
-    ov_runs = NULL; ov_img = ov_bg = ov_last = NULL;
+    free(ov_runs); free(ov_img); free(ov_bg); free(ov_last); free(ov_pre); free(ov_pre_lit);
+    ov_runs = NULL; ov_img = ov_bg = ov_last = ov_pre = ov_pre_lit = NULL;
     ov_nruns = ov_npix = 0; ov_on = 0;
     core_frame_hook = NULL;
 }
@@ -1077,34 +1078,81 @@ static void ov_build(void)
     }
     memset(g_fb, 0, SCR_W * GAME_H * 2);
     ov_on = 1;
+    ov_prepare();
 }
 
-/* opacity steps for transparency 0/25/50/75%; 100% = not drawn (touch still works) */
+/* opacity steps for transparency 0/25/50/75%; 100% = not drawn (touch still works).
+ * The sprite's share of every pixel is computed once (ov_pre / ov_pre_lit), so per frame and
+ * pixel only the background's share is added:  out = pre + part(bg).
+ * The core may leave pixels untouched between frames (borders): then the saved background
+ * is used again instead of blending over our own previous output. */
+static void ov_prepare(void)
+{
+    int k;
+    free(ov_pre); free(ov_pre_lit);
+    ov_pre = malloc(ov_npix * 2 + 2); ov_pre_lit = malloc(ov_npix * 2 + 2);
+    if (!ov_pre || !ov_pre_lit) { free(ov_pre); free(ov_pre_lit); ov_pre = ov_pre_lit = NULL; return; }
+    for (k = 0; k < ov_npix; k++) {
+        uint16_t fg = ov_img[k];
+        ov_pre_lit[k] = AVG565(fg, RGB565(120, 190, 255));                 /* pressed: solid, bluish */
+        switch (ov_alpha) {
+        case 0: ov_pre[k] = fg; break;                                      /* 100% sprite */
+        case 1: ov_pre[k] = (uint16_t)(fg - ((fg & 0xE79C) >> 2)); break;   /* 75% sprite */
+        case 2: ov_pre[k] = (uint16_t)((fg & 0xF7DE) >> 1); break;          /* 50% */
+        default: ov_pre[k] = (uint16_t)((fg & 0xE79C) >> 2); break;         /* 25% */
+        }
+    }
+}
+
 static void ov_blend(void)
 {
-    int r, k = 0;
+    int r, k = 0, a = ov_alpha;
     unsigned lit = ov_lit;
-    if (!ov_on || ov_alpha >= 4) return;
+    if (!ov_on || a >= 4 || !ov_pre) return;
     for (r = 0; r < ov_nruns; r++) {
         const struct ov_run *ru = ov_runs + r;
-        uint16_t *d = g_fb + ru->y * SCR_W + ru->x;
-        int n = ru->n, i, a = (lit >> ru->id) & 1 ? 0 : ov_alpha;     /* pressed: solid */
-        for (i = 0; i < n; i++, k++) {
-            uint16_t cur = d[i], bg, fg = ov_img[k], out, m;
-            bg = (cur == ov_last[k]) ? ov_bg[k] : cur;   /* the core did not redraw this pixel */
-            ov_bg[k] = bg;
-            if ((lit >> ru->id) & 1) {                    /* pressed: brighter */
-                fg = AVG565(fg, RGB565(120, 190, 255));
+        uint16_t *d = g_fb + ru->y * SCR_W + ru->x, *last = ov_last + k, *bgs = ov_bg + k;
+        int n = ru->n, i;
+        if ((lit >> ru->id) & 1) {
+            const uint16_t *p = ov_pre_lit + k;
+            for (i = 0; i < n; i++) {
+                uint16_t cur = d[i];
+                if (cur != last[i]) bgs[i] = cur;
+                d[i] = last[i] = p[i];
             }
+        } else {
+            const uint16_t *p = ov_pre + k;
             switch (a) {
-            case 0: out = fg; break;
-            case 1: m = AVG565(bg, fg); out = AVG565(m, fg); break;
-            case 2: out = AVG565(bg, fg); break;
-            default: m = AVG565(bg, fg); out = AVG565(m, bg); break;
+            case 0:
+                for (i = 0; i < n; i++) { uint16_t cur = d[i]; if (cur != last[i]) bgs[i] = cur; d[i] = last[i] = p[i]; }
+                break;
+            case 1:
+                for (i = 0; i < n; i++) {
+                    uint16_t cur = d[i], o;
+                    if (cur == last[i]) cur = bgs[i]; else bgs[i] = cur;
+                    o = (uint16_t)(p[i] + ((cur & 0xE79C) >> 2));
+                    d[i] = last[i] = o;
+                }
+                break;
+            case 2:
+                for (i = 0; i < n; i++) {
+                    uint16_t cur = d[i], o;
+                    if (cur == last[i]) cur = bgs[i]; else bgs[i] = cur;
+                    o = (uint16_t)(p[i] + ((cur & 0xF7DE) >> 1));
+                    d[i] = last[i] = o;
+                }
+                break;
+            default:
+                for (i = 0; i < n; i++) {
+                    uint16_t cur = d[i], o;
+                    if (cur == last[i]) cur = bgs[i]; else bgs[i] = cur;
+                    o = (uint16_t)(p[i] + cur - ((cur & 0xE79C) >> 2));
+                    d[i] = last[i] = o;
+                }
+                break;
             }
-            d[i] = out;
-            ov_last[k] = out;
         }
+        k += n;
     }
 }
 

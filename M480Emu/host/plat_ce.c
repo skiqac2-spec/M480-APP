@@ -330,6 +330,8 @@ static int16_t *wbuf[NBUF];
 static int16_t *ring;
 static unsigned ring_r, ring_w;                /* in frames, free running */
 static int queued[NBUF], audio_started;
+static unsigned long submitted;                /* frames handed to the device since open/reset */
+static int pos_ok = 1;                          /* waveOutGetPosition works */
 
 int plat_audio_open(int rate)
 {
@@ -361,6 +363,7 @@ int plat_audio_open(int rate)
     }
     ring_r = ring_w = 0;
     audio_started = 0;
+    submitted = 0;
     return 0;
 }
 
@@ -385,7 +388,7 @@ void plat_audio_pump(void)
     }
     if (nq == 0) audio_started = 0;                       /* ran dry: rebuild a little cushion */
     if (!audio_started) {
-        if (ring_w - ring_r < BUF_FRAMES * 5) return;     /* ~115ms cushion before playing */
+        if (ring_w - ring_r < BUF_FRAMES * 3) return;     /* ~70ms cushion before playing */
         audio_started = 1;
     }
     for (i = 0; i < NBUF && ring_w - ring_r >= BUF_FRAMES; i++) {
@@ -398,8 +401,10 @@ void plat_audio_pump(void)
         if (k < BUF_FRAMES) memcpy(wbuf[i] + k * 2, ring, (BUF_FRAMES - k) * 4);
         ring_r += BUF_FRAMES;
         whdr[i].dwFlags &= ~WHDR_DONE;
-        if (waveOutWrite(h_wo, &whdr[i], sizeof(WAVEHDR)) == MMSYSERR_NOERROR)
+        if (waveOutWrite(h_wo, &whdr[i], sizeof(WAVEHDR)) == MMSYSERR_NOERROR) {
             queued[i] = 1;
+            submitted += BUF_FRAMES;
+        }
     }
 }
 
@@ -429,10 +434,27 @@ void plat_audio_write(const int16_t *pcm, int frames)
 int plat_audio_fill(void)
 {
     int i, nq = 0;
+    unsigned long pending;
     if (!h_wo || !ring) return 0;
-    for (i = 0; i < NBUF; i++)
+    pending = ring_w - ring_r;
+    if (pos_ok) {                                   /* exact: what the device has not played yet */
+        MMTIME mt;
+        memset(&mt, 0, sizeof(mt));
+        mt.wType = TIME_SAMPLES;
+        if (waveOutGetPosition(h_wo, &mt, sizeof(mt)) == MMSYSERR_NOERROR && mt.wType == TIME_SAMPLES) {
+            unsigned long played = mt.u.sample;
+            if (played <= submitted) return (int)((pending + submitted - played) * 1000u / (unsigned)cur_rate);
+        } else
+            pos_ok = 0;
+    }
+    for (i = 0; i < NBUF; i++)                      /* fallback: whole buffers still queued */
         if (queued[i] && !(whdr[i].dwFlags & WHDR_DONE)) nq++;
-    return (int)((ring_w - ring_r + (unsigned)nq * BUF_FRAMES) * 1000u / (unsigned)cur_rate);
+    return (int)((pending + (unsigned)nq * BUF_FRAMES) * 1000u / (unsigned)cur_rate);
+}
+
+int plat_audio_active(void)
+{
+    return h_wo != NULL && audio_started;
 }
 
 int plat_audio_rate(void)
@@ -447,6 +469,7 @@ void plat_audio_pause(int on)
     if (on) {
         waveOutReset(h_wo);
         for (i = 0; i < NBUF; i++) queued[i] = 0;
+        submitted = 0;
         ring_r = ring_w = 0;
         audio_started = 0;
     }

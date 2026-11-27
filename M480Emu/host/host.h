@@ -76,7 +76,8 @@ void     plat_audio_close(void);
 void     plat_audio_write(const int16_t *pcm, int frames);
 int      plat_audio_fill(void);                      /* queued audio in milliseconds */
 void     plat_audio_pump(void);
-int      plat_audio_rate(void);                      /* output rate the device is (or will be) opened with */                      /* hand finished buffers back to the device */
+int      plat_audio_rate(void);
+int      plat_audio_active(void);                    /* sound device open and playing */                      /* output rate the device is (or will be) opened with */                      /* hand finished buffers back to the device */
 void     plat_audio_pause(int on);
 
 #define PSEP '\\'

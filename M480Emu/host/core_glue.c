@@ -276,7 +276,8 @@ void core_redraw(void)
  *   input low-pass (anti-alias) -> resample -> low cut (~80 Hz) -> level -> limiter
  * The resampling ratio also follows the amount of queued audio by at most a few percent, so a
  * small speed difference does not let the queue run dry (crackle) or grow (delay). */
-#define AUDIO_TARGET_MS 140
+#define AUDIO_TARGET_MS 110              /* queued sound the pacing keeps (ms) */
+#define AUDIO_LOW_MS    60               /* below this the emulation is behind: skip frames */
 static double rs_in_rate = 44100.0;
 static int rs_out_rate;
 static unsigned rs_base = 0x10000, rs_step = 0x10000, rs_pos;      /* 16.16 source position */
@@ -314,14 +315,13 @@ static void audio_setup(void)
     plat_log("audio: core %.0f Hz -> %d Hz\n", rs_in_rate, rs_out_rate);
 }
 
+/* The emulation is paced by the sound device (core_run_frame waits for room in the audio
+ * queue), so produced and played audio always match: the resampling ratio stays fixed and the
+ * pitch never changes.  When the phone is too slow, frames are skipped; if it is still too
+ * slow, the sound has short gaps rather than being stretched like a slow tape. */
 static void audio_adapt(void)
 {
-    int fill = plat_audio_fill();                  /* queued milliseconds */
-    int want = 1024 + (AUDIO_TARGET_MS - fill) * 120 / AUDIO_TARGET_MS;
-    if (want < 1004) want = 1004;                  /* at most ~2% faster, */
-    if (want > 1090) want = 1090;                  /* ~6% slower: no audible wobble */
-    rs_stretch += (want - rs_stretch) / 16;
-    rs_step = (unsigned)(((unsigned long long)rs_base << 10) / (unsigned)rs_stretch);
+    rs_step = rs_base;
 }
 
 static inline int16_t post(int ch, int v)
@@ -566,13 +566,23 @@ void core_run_frame(void)
 {
     unsigned now;
     double t;
+    int audio_sync;
     if (!loaded) return;
 
+    /* pacing: by the sound device when sound is on (exact, like a stand-alone emulator),
+     * by the clock otherwise */
+    audio_sync = cfg.sound && plat_audio_active();
     now = plat_ticks();
     t = (double)now;
-    if (due_ms == 0 || t > due_ms + 150.0 || t < due_ms - 150.0)
-        due_ms = t;                                     /* (re)sync */
-    behind = t > due_ms + 3.0;
+    if (audio_sync) {
+        int fill = plat_audio_fill();
+        behind = fill < AUDIO_LOW_MS;
+        due_ms = 0;
+    } else {
+        if (due_ms == 0 || t > due_ms + 150.0 || t < due_ms - 150.0)
+            due_ms = t;                                 /* (re)sync */
+        behind = t > due_ms + 3.0;
+    }
 
     if (audio_status_cb)
         audio_status_cb(true, behind ? 0 : 50, behind);
@@ -588,12 +598,21 @@ void core_run_frame(void)
     retro_run();
     plat_audio_pump();
 
-    due_ms += frame_ms;
-    now = plat_ticks();
-    if ((double)now < due_ms) {
-        int ms = (int)(due_ms - (double)now);
-        if (ms > 0) plat_sleep(ms > 50 ? 50 : ms);
-        plat_audio_pump();
+    if (audio_sync) {
+        /* wait until the queued sound drops to the target, then emulate the next frame */
+        unsigned t0 = plat_ticks();
+        while (plat_audio_fill() > AUDIO_TARGET_MS && plat_ticks() - t0 < 100) {
+            plat_sleep(2);
+            plat_audio_pump();
+        }
+    } else {
+        due_ms += frame_ms;
+        now = plat_ticks();
+        if ((double)now < due_ms) {
+            int ms = (int)(due_ms - (double)now);
+            if (ms > 0) plat_sleep(ms > 50 ? 50 : ms);
+            plat_audio_pump();
+        }
     }
 
     fps_frames++;

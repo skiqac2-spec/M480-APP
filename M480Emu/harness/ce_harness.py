@@ -145,6 +145,7 @@ WM_KEYDOWN, WM_KEYUP, WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_CLOSE, WM_A
 screen = np.zeros((320, 320), np.uint16)
 shots = 0
 wave_fresh = [True]
+wave_frames_sub = [0]
 wav_data = bytearray(); wave_hdrs = []; wave_done_at = 0.0; wave_rate = 44100
 stats = {'blit': 0, 'flush': 0, 'wavewrite': 0, 'api': 0}
 log_lines = []
@@ -479,13 +480,14 @@ def api_waveOutWrite(h, hdr, sz, *_):
     global wave_done_at
     data, ln = r32(hdr), r32(hdr + 4)
     if stats['wavewrite'] and not wave_fresh[0] and clock > wave_done_at + 1.0:
-        stats['underrun'] = stats.get('underrun', 0) + 1; stats['gap_ms'] = stats.get('gap_ms', 0) + (clock - wave_done_at)
+        stats['underrun'] = stats.get('underrun', 0) + 1; stats.setdefault('ur_t', []).append(int(clock)); stats['gap_ms'] = stats.get('gap_ms', 0) + (clock - wave_done_at)
     wave_fresh[0] = False
-    wav_data.extend(rd(data, ln))
+    wav_data.extend(rd(data, ln)); wave_frames_sub[0] += ln // 4
     wave_done_at = max(wave_done_at, clock) + ln / 4 * 1000.0 / wave_rate
     w32(hdr + 16, (r32(hdr + 16) & ~1) | 0x10); wave_hdrs.append((hdr, wave_done_at)); stats['wavewrite'] += 1; return 0
 def api_waveOutReset(*_):
     global wave_done_at
+    wave_frames_sub[0] = 0
     wave_fresh[0] = True
     for h in wave_hdrs: w32(h[0] + 16, (r32(h[0] + 16) | 1) & ~0x10)
     wave_hdrs.clear(); wave_done_at = clock; return 0
@@ -664,6 +666,7 @@ API = {
  # --- audio ---
  'waveOutOpen': api_waveOutOpen, 'waveOutClose': lambda *_: 0, 'waveOutPrepareHeader': lambda *_: 0,
  'waveOutUnprepareHeader': lambda *_: 0, 'waveOutWrite': api_waveOutWrite, 'waveOutReset': api_waveOutReset,
+ 'waveOutGetPosition': lambda h, p, n, *_: (wr(p, struct.pack('<II', 2, max(0, wave_frames_sub[0] - int(max(0.0, wave_done_at - clock) * wave_rate / 1000.0)))), 0)[1],
 }
 missing = [n for n in imports if n not in API]
 if missing: print('WARNING: unimplemented imports:', missing)
@@ -745,6 +748,7 @@ if args.profile:
     print('PROFILE:', ', '.join('%s %.1f%%' % (k, v * 100.0 / tot) for k, v in sorted(agg.items(), key=lambda kv: -kv[1])[:22]))
 print('top api:', sorted(api_hist.items(), key=lambda kv: -kv[1])[:8])
 print('big mallocs:', ', '.join('%dK@%s' % (n // 1024, w) for n, w in big_log))
+print('underrun times:', stats.get('ur_t', [])[:30])
 print('audio: %d underruns, %.0f ms of silence gaps, %.1f s written' % (stats.get('underrun', 0), stats.get('gap_ms', 0), len(wav_data) / 4 / max(wave_rate, 1)))
 print('done: clock=%d ms, api calls=%d, blits=%d, icache flushes=%d, wave buffers=%d, big-alloc peak=%.1f MB, heap=%.1f MB, insns=%.0f M'
       % (clock, stats['api'], stats['blit'], stats['flush'], stats['wavewrite'], va_peak / 1048576, (heap_top - HEAP) / 1048576, insn_total / 1e6))
