@@ -292,3 +292,31 @@ void entropy_get(unsigned char out[32])
 	LeaveCriticalSection(&g_pool_cs);
 	entropy_stir(out, 8);
 }
+
+/* ---------------- characters the phone font lacks ---------------- */
+#include "glyphmap.h"
+void glyph_fix(WCHAR *w)
+{
+	WCHAR *o = w;
+	if (!w) return;
+	for (; *w; w++) {
+		unsigned c = *w;
+		int lo, hi;
+		if (c >= 0xD800 && c <= 0xDFFF) continue;                  /* emoji etc. (outside the BMP) */
+		if ((c >= 0xFE00 && c <= 0xFE0F) || (c >= 0x200B && c <= 0x200F) || c == 0x2060 || c == 0xFEFF) continue;   /* invisible joiners */
+		if (c >= 0x2600 && c <= 0x27BF) {                          /* symbol/emoji block: keep only the ones mapped */
+			int found = 0;
+			lo = 0; hi = (int)(sizeof g_glyph_src / sizeof g_glyph_src[0]) - 1;
+			while (lo <= hi) { int m = (lo + hi) / 2; if (g_glyph_src[m] == c) { found = 1; c = g_glyph_dst[m]; break; } if (g_glyph_src[m] < c) lo = m + 1; else hi = m - 1; }
+			if (!found) continue;
+			*o++ = (WCHAR)c;
+			continue;
+		}
+		if (c >= 0x80) {
+			lo = 0; hi = (int)(sizeof g_glyph_src / sizeof g_glyph_src[0]) - 1;
+			while (lo <= hi) { int m = (lo + hi) / 2; if (g_glyph_src[m] == c) { c = g_glyph_dst[m]; break; } if (g_glyph_src[m] < c) lo = m + 1; else hi = m - 1; }
+		}
+		*o++ = (WCHAR)c;
+	}
+	*o = 0;
+}

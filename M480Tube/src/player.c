@@ -679,6 +679,7 @@ static void text_u8(HDC dc, const char *s, RECT *r, UINT fmt)
 {
 	WCHAR *w = utf8_to_w(s, -1, NULL);
 	if (!w) return;
+	glyph_fix(w);
 	DrawTextW(dc, w, -1, r, fmt);
 	free(w);
 }

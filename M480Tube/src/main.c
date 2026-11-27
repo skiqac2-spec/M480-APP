@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "3.5"
+#define VERSION   "3.6"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -605,6 +605,7 @@ static void text_u8(HDC dc, const char *s, RECT *r, UINT fmt)
 	if (!s) return;
 	w = utf8_to_w(s, -1, NULL);
 	if (!w) return;
+	glyph_fix(w);
 	DrawTextW(dc, w, -1, r, fmt | DT_NOPREFIX);
 	free(w);
 }
