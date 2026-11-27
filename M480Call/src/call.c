@@ -18,7 +18,7 @@
 
 #define APP_CLASS L"M480CallWnd"
 #define APP_TITLE L"M480 통화"
-#define APP_VER   L"0.1 테스트판"
+#define APP_VER   L"0.2 테스트판"
 
 #define WM_APP_REFRESH (WM_APP + 1)
 #define WM_APP_RING    (WM_APP + 2)
@@ -90,6 +90,19 @@ static PFN_AcceptSCO pAcceptSCO;
 static PFN_GetBB pGetBB;
 static PFN_GetMode pGetMode;
 static PFN_SetMode pSetMode;
+typedef int (*PFN_ReadCOD)(unsigned int *);
+typedef int (*PFN_WriteCOD)(unsigned int);
+typedef int (*PFN_SetPIN)(BTADDR *, int, unsigned char *);
+typedef int (*PFN_PairReq)(BTADDR *, int, unsigned char *);
+static PFN_ReadCOD pReadCOD;
+static PFN_WriteCOD pWriteCOD;
+static PFN_SetPIN pSetPIN;
+static PFN_PairReq pPairReq;
+static unsigned int g_origCod;
+static int g_codSaved, g_hfMode;
+static DWORD g_origMode = 99;
+static volatile int g_pairing;
+#define HF_COD 0x200408   /* 오디오 서비스 + 오디오/비디오 기기 + 핸즈프리 */
 static unsigned short g_scoHandle;
 static int g_scoMine;               /* 내가 만든 SCO */
 static int g_scoUp, g_scoEver;
@@ -298,10 +311,16 @@ static void bt_load(void)
         pCloseConn = (PFN_CloseConn)GetProcAddressW(h, L"BthCloseConnection");
         pAcceptSCO = (PFN_AcceptSCO)GetProcAddressW(h, L"BthAcceptSCOConnections");
         pGetBB = (PFN_GetBB)GetProcAddressW(h, L"BthGetBasebandConnections");
+        pReadCOD = (PFN_ReadCOD)GetProcAddressW(h, L"BthReadCOD");
+        pWriteCOD = (PFN_WriteCOD)GetProcAddressW(h, L"BthWriteCOD");
+        pSetPIN = (PFN_SetPIN)GetProcAddressW(h, L"BthSetPIN");
+        pPairReq = (PFN_PairReq)GetProcAddressW(h, L"BthPairRequest");
     }
     logw(L"btdrt.dll %s: 주소 %d, SCO만들기 %d, 끊기 %d, SCO수락 %d, 링크목록 %d",
          h ? L"있음" : L"없음", pReadLocalAddr != NULL, pCreateSCO != NULL, pCloseConn != NULL,
          pAcceptSCO != NULL, pGetBB != NULL);
+    logw(L"기기종류 읽기 %d, 쓰기 %d, PIN설정 %d, 페어링요청 %d",
+         pReadCOD != NULL, pWriteCOD != NULL, pSetPIN != NULL, pPairReq != NULL);
     h = LoadLibraryW(L"bthutil.dll");
     if (h) {
         pGetMode = (PFN_GetMode)GetProcAddressW(h, L"BthGetMode");
@@ -340,6 +359,7 @@ static void bt_info(void)
          reg_exists(L"Software\\Microsoft\\Bluetooth"), reg_exists(L"Software\\Widcomm"),
          reg_exists(L"Software\\Broadcom"));
     if (pGetMode && pGetMode(&mode) == 0) {
+        g_origMode = mode;
         logw(L"블루투스 모드: %lu (0=꺼짐 1=켜짐 2=검색허용)", mode);
         if (mode == 0 && pSetMode) {
             int r = pSetMode(1);
@@ -351,6 +371,31 @@ static void bt_info(void)
         addr_str(me, as);
         logw(L"M480 블루투스 주소: %s", as);
     } else logw(L"M480 주소 읽기 실패 (블루투스가 꺼져 있을 수 있음)");
+}
+
+/* 아이폰 호환: M480을 '핸즈프리' 기기로 보이게 함 (끝날 때 원래대로) */
+static void hf_mode(int on)
+{
+    if (on) {
+        unsigned int c = 0;
+        if (pReadCOD && pReadCOD(&c) == 0) {
+            if (!g_codSaved) { g_origCod = c; g_codSaved = 1; }
+            logw(L"원래 기기 종류: %06X", c);
+        }
+        if (!pWriteCOD) { logw(L"기기 종류를 바꿀 수 없음 (함수 없음)"); return; }
+        {
+            int r = pWriteCOD(HF_COD);
+            logw(L"기기 종류를 핸즈프리(%06X)로 → %d", HF_COD, r);
+            g_hfMode = (r == 0);
+        }
+        if (pSetMode) logw(L"다른 기기에서 보이기 켜기 → %d", pSetMode(2));
+        if (pReadCOD && pReadCOD(&c) == 0) logw(L"지금 기기 종류: %06X", c);
+    } else {
+        if (g_codSaved && pWriteCOD) logw(L"기기 종류 원래대로 → %d", pWriteCOD(g_origCod));
+        if (g_origMode <= 2 && pSetMode) pSetMode(g_origMode);
+        g_hfMode = 0;
+    }
+    redraw();
 }
 
 /* 페어링된 기기: HKLM\Software\Microsoft\Bluetooth\Device\<주소> */
@@ -405,6 +450,33 @@ static void pick_saved(void)
     int i;
     g_devSel = g_devN ? 0 : -1;
     for (i = 0; i < g_devN; i++) if (g_dev[i].a == g_savedAddr) g_devSel = i;
+}
+
+/* M480에서 페어링 요청 (PIN 0000) */
+static void load_paired(void);
+static DWORD WINAPI pair_thread(LPVOID p)
+{
+    BTADDR a = *(BTADDR *)p;
+    unsigned char pin[4] = { '0', '0', '0', '0' };
+    wchar_t as[20];
+    int r;
+    free(p);
+    addr_str(a, as);
+    logw(L"%s 에 페어링 요청 (PIN 0000) - 폰에 입력창이 뜨면 0000 입력", as);
+    if (pSetPIN) logw(L"PIN 미리 설정 → %d", pSetPIN(&a, 4, pin));
+    if (!pPairReq) { logw(L"페어링 요청 함수 없음 - 폰 쪽에서 M480을 눌러 주세요"); g_pairing = 0; redraw(); return 0; }
+    SetLastError(0);
+    r = pPairReq(&a, 4, pin);
+    if (r == 0) {
+        int i;
+        logw(L"[성공] 페어링 완료");
+        EnterCriticalSection(&g_cs);
+        for (i = 0; i < g_devN; i++) if (g_dev[i].a == a) g_dev[i].paired = 1;
+        LeaveCriticalSection(&g_cs);
+    } else logw(L"[실패] 페어링 실패 (결과 %d, 오류 %lu)", r, GetLastError());
+    g_pairing = 0;
+    redraw();
+    return 0;
 }
 
 /* 주변 기기 찾기 */
@@ -1139,6 +1211,21 @@ static void act_find(void)
     redraw();
 }
 
+static void act_pair(void)
+{
+    BTADDR *pa;
+    DWORD tid;
+    HANDLE h;
+    if (g_pairing || g_session) return;
+    if (g_devSel < 0) { logw(L"[찾기]로 폰을 먼저 찾으세요 (아이폰은 설정 > 블루투스 화면을 열어 둔 상태)"); return; }
+    g_pairing = 1;
+    pa = (BTADDR *)malloc(sizeof(BTADDR));
+    *pa = g_dev[g_devSel].a;
+    h = CreateThread(NULL, 0, pair_thread, pa, 0, &tid);
+    if (h) CloseHandle(h);
+    redraw();
+}
+
 static int in_call(void) { return ind_get("call") == 1; }
 static int ringing(void) { return ind_get("callsetup") == 1; }
 
@@ -1192,7 +1279,7 @@ static int g_pressId = -1;
 enum {
     B_TAB_MAIN = 1, B_TAB_LOG, B_QUIT, B_PREV, B_NEXT, B_FIND, B_CONN,
     B_DIAL, B_ANSWER, B_HANG, B_BACK, B_SCO, B_BRIDGE, B_ADEV,
-    B_LUP, B_LDOWN, B_LEND, B_KEY0 = 100
+    B_LUP, B_LDOWN, B_LEND, B_PAIR, B_HFMODE, B_KEY0 = 100
 };
 
 #define C_BG   RGB(18, 20, 26)
@@ -1248,9 +1335,9 @@ static void paint_main(HDC dc, int W, int H, int y0)
     RECT r;
     COLORREF sc;
     int u, y = y0, x, i, bw, pad = 4 * g_scale;
-    int rowH[8] = { 36, 26, 22, 28, 112, 32, 28, 42 };
+    int rowH[9] = { 36, 26, 26, 22, 28, 112, 32, 28, 42 };
     int need = 0;
-    for (i = 0; i < 8; i++) need += rowH[i];
+    for (i = 0; i < 9; i++) need += rowH[i];
     u = (H - y0) * 100 / (need * g_scale);
     if (u > 100) u = 100;
 #define RH(k) (rowH[k] * g_scale * u / 100)
@@ -1287,13 +1374,19 @@ static void paint_main(HDC dc, int W, int H, int y0)
     } else wcscpy(s, L"폰 없음");
     text(dc, s, &r, fNorm, C_TXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     button(dc, W - bw * 4, y, bw, RH(1), B_NEXT, L"▶", C_BTN, fBold);
-    button(dc, W - bw * 3, y, bw * 3 / 2, RH(1), B_FIND, g_inquiring ? L"찾는중" : L"찾기", C_BTN, fSmall);
-    button(dc, W - bw * 3 + bw * 3 / 2, y, W - (W - bw * 3 + bw * 3 / 2), RH(1), B_CONN,
+    button(dc, W - bw * 3, y, bw * 3, RH(1), B_CONN,
            g_session ? L"끊기" : L"연결", g_session ? C_RED : C_GRN, fBold);
     y += RH(1);
 
+    /* 2b. 기기 관리 */
+    bw = W / 3;
+    button(dc, 0, y, bw, RH(2), B_FIND, g_inquiring ? L"찾는 중..." : L"폰 찾기", C_BTN, fSmall);
+    button(dc, bw, y, bw, RH(2), B_PAIR, g_pairing ? L"페어링 중..." : L"페어링", C_BTN, fSmall);
+    button(dc, bw * 2, y, W - bw * 2, RH(2), B_HFMODE, g_hfMode ? L"핸즈프리로 보임" : L"폰으로 보임", g_hfMode ? C_GRN : C_BTN, fSmall);
+    y += RH(2);
+
     /* 3. 통화 상태 */
-    SetRect(&r, pad, y, W - pad, y + RH(2));
+    SetRect(&r, pad, y, W - pad, y + RH(3));
     {
         COLORREF c = C_DIM;
         int cs = ind_get("callsetup");
@@ -1312,20 +1405,20 @@ static void paint_main(HDC dc, int W, int H, int y0)
         s[159] = 0;
         text(dc, s, &r, fBold, c, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    y += RH(2);
+    y += RH(3);
 
     /* 4. 번호 */
-    SetRect(&r, pad, y, W - W / 5, y + RH(3)); fill(dc, &r, C_PAN);
+    SetRect(&r, pad, y, W - W / 5, y + RH(4)); fill(dc, &r, C_PAN);
     MultiByteToWideChar(CP_ACP, 0, g_num, -1, s, 40);
     if (!g_num[0]) wcscpy(s, L"번호 입력");
     text(dc, s, &r, g_num[0] ? fBig : fNorm, g_num[0] ? C_TXT : C_DIM, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    button(dc, W - W / 5, y, W / 5, RH(3), B_BACK, L"지움", C_BTN, fSmall);
-    y += RH(3);
+    button(dc, W - W / 5, y, W / 5, RH(4), B_BACK, L"지움", C_BTN, fSmall);
+    y += RH(4);
 
     /* 5. 다이얼 */
     {
         static const char keys[] = "123456789*0#";
-        int kh = RH(4) / 4, kw = W / 3;
+        int kh = RH(5) / 4, kw = W / 3;
         for (i = 0; i < 12; i++) {
             wchar_t k[2] = { (wchar_t)keys[i], 0 };
             x = (i % 3) * kw;
@@ -1336,21 +1429,21 @@ static void paint_main(HDC dc, int W, int H, int y0)
 
     /* 6. 통화 버튼 */
     bw = W / 3;
-    button(dc, 0, y, bw, RH(5), B_DIAL, ringing() ? L"받기" : L"통화", C_GRN, fBold);
-    button(dc, bw, y, bw, RH(5), B_ANSWER, L"받기", C_GRN, fBold);
-    button(dc, bw * 2, y, W - bw * 2, RH(5), B_HANG, L"끊기", C_RED, fBold);
-    y += RH(5);
+    button(dc, 0, y, bw, RH(6), B_DIAL, ringing() ? L"받기" : L"통화", C_GRN, fBold);
+    button(dc, bw, y, bw, RH(6), B_ANSWER, L"받기", C_GRN, fBold);
+    button(dc, bw * 2, y, W - bw * 2, RH(6), B_HANG, L"끊기", C_RED, fBold);
+    y += RH(6);
 
     /* 7. 음성 */
-    button(dc, 0, y, bw, RH(6), B_SCO, g_scoUp ? L"음성 끊기" : L"음성 연결", C_BTN, fSmall);
-    button(dc, bw, y, bw, RH(6), B_BRIDGE, g_bridgeOn ? L"중계 중지" : L"소리 중계", g_bridgeOn ? C_GRN : C_BTN, fSmall);
+    button(dc, 0, y, bw, RH(7), B_SCO, g_scoUp ? L"음성 끊기" : L"음성 연결", C_BTN, fSmall);
+    button(dc, bw, y, bw, RH(7), B_BRIDGE, g_bridgeOn ? L"중계 중지" : L"소리 중계", g_bridgeOn ? C_GRN : C_BTN, fSmall);
     _snwprintf(w, 63, L"장치 %d/%u", g_audioDev, g_nOut > 1 ? g_nOut - 1 : 0);
-    button(dc, bw * 2, y, W - bw * 2, RH(6), B_ADEV, w, C_BTN, fSmall);
-    y += RH(6);
+    button(dc, bw * 2, y, W - bw * 2, RH(7), B_ADEV, w, C_BTN, fSmall);
+    y += RH(7);
 
     /* 8. 테스트 결과 요약 */
     {
-        int lh = RH(7) / 3;
+        int lh = RH(8) / 3;
         SetRect(&r, pad, y, W - pad, y + lh);
         text(dc, g_everReady ? L"① 폰 연결: 성공" : (g_state == ST_FAIL ? L"① 폰 연결: 실패" : L"① 폰 연결: 아직"),
              &r, fTiny, g_everReady ? C_OK : (g_state == ST_FAIL ? C_BAD : C_DIM), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -1452,6 +1545,8 @@ static void do_button(int id)
     case B_PREV: if (!g_session && g_devN) { g_devSel = (g_devSel + g_devN - 1) % g_devN; g_state = ST_IDLE; } break;
     case B_NEXT: if (!g_session && g_devN) { g_devSel = (g_devSel + 1) % g_devN; g_state = ST_IDLE; } break;
     case B_FIND: act_find(); break;
+    case B_PAIR: act_pair(); break;
+    case B_HFMODE: hf_mode(!g_hfMode); break;
     case B_CONN: act_connect(); break;
     case B_DIAL: act_dial(); break;
     case B_ANSWER: ui_send("ATA\r", L"전화 받기"); break;
@@ -1587,6 +1682,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
     load_paired();
     pick_saved();
     wave_info();
+    hf_mode(1);
     {
         wchar_t lp[MAX_PATH];
         wcscpy(lp, g_exeDir); wcscat(lp, L"M480Call_log.txt");
@@ -1606,6 +1702,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
     bridge_stop();
     sco_close();
     sdp_unregister();
+    hf_mode(0);
     if (g_listenSock != INVALID_SOCKET) closesocket(g_listenSock);
     Sleep(300);
     save_settings();
