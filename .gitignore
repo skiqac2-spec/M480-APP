@@ -25,3 +25,7 @@ M480Batt/M480Batt-preview.exe
 M480Batt/res.o
 M480Batt/out/
 M480Batt/M480Batt_log.csv
+M480Nico/build/
+M480Nico/ffmpeg-win/
+M480Nico/ffmpeg-ce/
+M480Nico/out/
