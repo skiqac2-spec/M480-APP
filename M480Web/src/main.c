@@ -28,6 +28,7 @@ int img_decode(const unsigned char *data, int len, int maxw, Img *im);
 #define TM_RELAYOUT 2
 #define TM_REFRESH  3
 #define TM_HOLD     4
+#define TM_SBREP    9
 
 #ifdef _WIN32_WCE
 #define THREAD_STACK 0x40000
@@ -103,14 +104,16 @@ static int doc_is_foreign(Doc *d);
 static int g_down, g_dragging, g_down_x, g_down_y, g_last_y, g_press_link = -1, g_press_ctl = -1;
 static DWORD g_last_t;
 static int g_vel;      /* px per 25ms * 16 */
-static int g_sbdrag, g_sboff;   /* dragging the scroll handle on the right */
+static int g_sbdrag;            /* holding a scroll button: 1 up, 2 down */
 static int g_nofire;            /* this touch stopped a fling: don't open anything */
-#define SB_W  30                /* scroll handle touch width (like M480Tube) */
-#define SB_TH 52                /* scroll handle height */
+#define SB_BS  40               /* fixed see-through scroll buttons (bottom right, like M480Tube) */
+#define SB_GAP 6
 static int g_field_ctl = -1;
 static int g_hold_link = -1;
 static HBITMAP g_back_bm;
 static int g_back_w, g_back_h;
+static unsigned short *g_back_bits;   /* RGB565 pixels of the back buffer (for see-through buttons) */
+static int g_back_stride;
 
 /* ---------------- forward ---------------- */
 static void navigate(const char *url, const char *post, int postlen, const char *ctype, int mode);
@@ -720,7 +723,7 @@ static DWORD WINAPI load_thread(LPVOID p)
 				Img *im = &j->doc->imgs[0];
 				free(im->url);
 				im->url = xstrdup(j->resp.url);
-				if (img_decode((unsigned char *)j->resp.body.p, j->resp.body.len, view_width() - SB_W - SC(4), im)) im->state = 2;
+				if (img_decode((unsigned char *)j->resp.body.p, j->resp.body.len, view_width() - SC(4), im)) im->state = 2;
 				else im->state = 3;
 			}
 		} else {
@@ -800,7 +803,7 @@ static void start_images(void)
 	ij->doc = g_doc;
 	doc_addref(g_doc);
 	ij->gen = g_gen;
-	ij->maxw = view_width() - SB_W - SC(4);
+	ij->maxw = view_width() - SC(4);
 	g_imgctl = &ij->ctl;
 	th = CreateThread(NULL, THREAD_STACK, img_thread, ij, THREAD_FLAGS, NULL);
 	if (th) CloseHandle(th);
@@ -1855,6 +1858,65 @@ static int view_height(void)
 	return r.bottom;
 }
 
+/* ---------------- fixed see-through scroll buttons ---------------- */
+static void sb_rects(int w, int h, RECT *up, RECT *dn)
+{
+	SetRect(dn, w - SB_BS - SB_GAP, h - SB_BS - SB_GAP, w - SB_GAP, h - SB_GAP);
+	SetRect(up, dn->left, dn->top - SB_BS - SB_GAP, dn->right, dn->top - SB_GAP);
+}
+
+/* tint a back-buffer rectangle: a = 0..256 amount of colour c (RGB565) */
+static void blend_rect(HDC dc, int x0, int y0, int x1, int y1, unsigned short c, int a)
+{
+	int x, y, cr = c >> 11, cg = (c >> 5) & 63, cb = c & 31;
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > g_back_w) x1 = g_back_w;
+	if (y1 > g_back_h) y1 = g_back_h;
+	if (x0 >= x1 || y0 >= y1) return;
+	if (!g_back_bits) {
+		/* no pixel access: plain fill */
+		RECT rr;
+		HBRUSH br = CreateSolidBrush(RGB((cr << 3) * a / 256, (cg << 2) * a / 256, (cb << 3) * a / 256));
+		SetRect(&rr, x0, y0, x1, y1);
+		FillRect(dc, &rr, br);
+		DeleteObject(br);
+		return;
+	}
+	for (y = y0; y < y1; y++) {
+		unsigned short *p = g_back_bits + y * g_back_stride;
+		for (x = x0; x < x1; x++) {
+			unsigned v = p[x];
+			int r = v >> 11, g = (v >> 5) & 63, b = v & 31;
+			r += ((cr - r) * a) >> 8;
+			g += ((cg - g) * a) >> 8;
+			b += ((cb - b) * a) >> 8;
+			p[x] = (unsigned short)((r << 11) | (g << 5) | b);
+		}
+	}
+}
+
+static void sb_draw(HDC dc, const RECT *r, int up, int pressed, int enabled)
+{
+	int cx = (r->left + r->right) / 2, cy = (r->top + r->bottom) / 2, k;
+	unsigned short bg = pressed ? 0x3A9A : 0x0000, ac = enabled ? 0xFFFF : 0x8410;
+	int a = pressed ? 200 : 140;
+
+	blend_rect(dc, r->left + 2, r->top, r->right - 2, r->bottom, bg, a);
+	blend_rect(dc, r->left, r->top + 2, r->left + 2, r->bottom - 2, bg, a);
+	blend_rect(dc, r->right - 2, r->top + 2, r->right, r->bottom - 2, bg, a);
+	for (k = 0; k < 9; k++) {               /* arrow */
+		int yy = up ? cy - 5 + k : cy + 4 - k;
+		blend_rect(dc, cx - k, yy, cx + k + 1, yy + 1, ac, enabled ? 230 : 140);
+	}
+}
+
+/* page up (dir -1) or down (+1) */
+static void sb_page(int dir)
+{
+	set_scroll(g_scroll + dir * (view_height() * 85 / 100));
+}
+
 static void update_scrollbar(void)
 {
 	SCROLLINFO si;
@@ -1892,7 +1954,7 @@ static void relayout(int keep_anchor)
 		if (lo < g_lay.nboxes) { anchor_item = g_lay.boxes[lo].item; anchor_off = g_lay.boxes[lo].y - g_scroll; }
 	}
 	hdc = GetDC(g_view);
-	layout_doc(&g_lay, hdc, g_doc, view_width() - SB_W + 4);   /* right strip kept for the scroll handle */
+	layout_doc(&g_lay, hdc, g_doc, view_width());
 	ReleaseDC(g_view, hdc);
 	if (anchor_item >= 0 && g_scroll > 0) {
 		int ny = layout_item_y(&g_lay, anchor_item) - anchor_off;
@@ -2027,33 +2089,32 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		HGDIOBJ old;
 		GetClientRect(h, &r);
 		if (!g_back_bm || g_back_w != r.right || g_back_h != r.bottom) {
+			struct { BITMAPINFOHEADER h; DWORD m[3]; } bi;
 			if (g_back_bm) DeleteObject(g_back_bm);
-			g_back_bm = CreateCompatibleBitmap(hdc, r.right, r.bottom);
+			memset(&bi, 0, sizeof bi);
+			bi.h.biSize = sizeof(BITMAPINFOHEADER);
+			bi.h.biWidth = r.right;
+			bi.h.biHeight = -r.bottom;
+			bi.h.biPlanes = 1;
+			bi.h.biBitCount = 16;
+			bi.h.biCompression = BI_BITFIELDS;
+			bi.m[0] = 0xF800; bi.m[1] = 0x07E0; bi.m[2] = 0x001F;
+			g_back_bits = NULL;
+			g_back_bm = CreateDIBSection(hdc, (BITMAPINFO *)&bi, DIB_RGB_COLORS, (void **)&g_back_bits, NULL, 0);
+			if (!g_back_bm) { g_back_bm = CreateCompatibleBitmap(hdc, r.right, r.bottom); g_back_bits = NULL; }
+			g_back_stride = ((r.right * 2 + 3) & ~3) / 2;
 			g_back_w = r.right; g_back_h = r.bottom;
 		}
 		mdc = CreateCompatibleDC(hdc);
 		old = SelectObject(mdc, g_back_bm);
 		{ HBRUSH bgb = CreateSolidBrush(C_BG); FillRect(mdc, &r, bgb); DeleteObject(bgb); }
 		layout_paint(&g_lay, mdc, g_scroll, r.bottom, g_press_link, g_press_ctl);
-		if (g_lay.height > r.bottom && r.bottom > SB_TH) {
-			/* scroll handle on the right: drag it to move through long pages quickly */
-			int w = r.right, hgt = r.bottom;
-			int by = (int)((long)g_scroll * (hgt - SB_TH) / (g_lay.height - hgt));
-			int x0 = w - SB_W + 6, x1 = w - 2, cx = (x0 + x1) / 2, k;
-			COLORREF hc = g_sbdrag ? DK(RGB(120, 150, 210), RGB(80, 105, 160)) : DK(RGB(200, 208, 222), RGB(62, 66, 78)), fg = DK(RGB(60, 70, 90), RGB(185, 190, 205));
-			RECT rr;
-			HBRUSH br;
-#define SBFILL(L, T, R, B, C) do { rr.left = (L); rr.top = (T); rr.right = (R); rr.bottom = (B); br = CreateSolidBrush(C); FillRect(mdc, &rr, br); DeleteObject(br); } while (0)
-			SBFILL(w - 3, 0, w - 1, hgt, DK(RGB(215, 218, 225), RGB(55, 58, 66)));                 /* track */
-			SBFILL(x0 - 1, by - 1, x1 + 1, by + SB_TH + 1, DK(RGB(150, 155, 170), RGB(95, 100, 115))); /* border */
-			SBFILL(x0, by, x1, by + SB_TH, hc);
-			for (k = 0; k < 6; k++) {                                             /* up / down arrows */
-				SBFILL(cx - k, by + 8 + k, cx + k + 1, by + 9 + k, fg);
-				SBFILL(cx - k, by + SB_TH - 9 - k, cx + k + 1, by + SB_TH - 8 - k, fg);
-			}
-			SBFILL(x0 + 5, by + SB_TH / 2 - 3, x1 - 5, by + SB_TH / 2 - 2, fg); /* grip */
-			SBFILL(x0 + 5, by + SB_TH / 2 + 1, x1 - 5, by + SB_TH / 2 + 2, fg);
-#undef SBFILL
+		if (g_lay.height > r.bottom && r.bottom > 2 * SB_BS + 3 * SB_GAP) {
+			/* fixed see-through ▲ / ▼ buttons at the bottom right: page up / down */
+			RECT up, dn;
+			sb_rects(r.right, r.bottom, &up, &dn);
+			sb_draw(mdc, &up, 1, g_sbdrag == 1, g_scroll > 0);
+			sb_draw(mdc, &dn, 0, g_sbdrag == 2, g_scroll < g_lay.height - r.bottom);
 		}
 		BitBlt(hdc, 0, 0, r.right, r.bottom, mdc, 0, 0, SRCCOPY);
 		SelectObject(mdc, old);
@@ -2115,17 +2176,23 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 			int vh;
 			GetClientRect(h, &cr);
 			vh = cr.bottom;
-			if (x >= cr.right - SB_W && g_lay.height > vh && vh > SB_TH) {
-				int by = (int)((long)g_scroll * (vh - SB_TH) / (g_lay.height - vh));
-				int on = (y >= by && y < by + SB_TH);
-				if (g_field) field_commit(1);
-				g_sbdrag = 1;
-				g_sboff = on ? y - by : SB_TH / 2;   /* tap the track: jump there */
-				g_down = 0;
-				g_press_link = g_press_ctl = -1;
-				if (!on) set_scroll((int)((long)(y - g_sboff) * (g_lay.height - vh) / (vh - SB_TH)));
-				InvalidateRect(h, NULL, FALSE);
-				return 0;
+			if (g_lay.height > vh && vh > 2 * SB_BS + 3 * SB_GAP) {
+				RECT up, dn;
+				POINT pt;
+				pt.x = x; pt.y = y;
+				sb_rects(cr.right, vh, &up, &dn);
+				InflateRect(&up, 4, 3);
+				InflateRect(&dn, 4, 3);
+				if (PtInRect(&up, pt) || PtInRect(&dn, pt)) {
+					if (g_field) field_commit(1);
+					g_sbdrag = PtInRect(&up, pt) ? 1 : 2;
+					g_down = 0;
+					g_press_link = g_press_ctl = -1;
+					sb_page(g_sbdrag == 1 ? -1 : 1);
+					SetTimer(g_hwnd, TM_SBREP, 450, NULL);   /* keep holding: keeps paging */
+					InvalidateRect(h, NULL, FALSE);
+					return 0;
+				}
 			}
 		}
 		g_down = 1; g_dragging = 0;
@@ -2144,13 +2211,7 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 	case WM_MOUSEMOVE: {
 		int x = (short)LOWORD(l), y = (short)HIWORD(l);
 		DWORD t = GetTickCount();
-		if (g_sbdrag) {
-			RECT cr;
-			GetClientRect(h, &cr);
-			if (g_lay.height > cr.bottom && cr.bottom > SB_TH)
-				set_scroll((int)((long)(y - g_sboff) * (g_lay.height - cr.bottom) / (cr.bottom - SB_TH)));
-			return 0;
-		}
+		if (g_sbdrag) return 0;
 		if (!g_down) return 0;
 		/* any real movement means scrolling, never a tap */
 		if (!g_dragging && (abs(y - g_down_y) > 6 || abs(x - g_down_x) > 10)) {
@@ -2174,7 +2235,7 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		int link = g_press_link, ctl = g_press_ctl;
 		KillTimer(g_hwnd, TM_HOLD);
 		ReleaseCapture();
-		if (g_sbdrag) { g_sbdrag = 0; InvalidateRect(h, NULL, FALSE); return 0; }
+		if (g_sbdrag) { g_sbdrag = 0; KillTimer(g_hwnd, TM_SBREP); InvalidateRect(h, NULL, FALSE); return 0; }
 		if (!g_down) return 0;
 		g_down = 0;
 		g_press_link = g_press_ctl = -1;
@@ -2843,6 +2904,12 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		}
 		break;
 	case WM_TIMER:
+		if (w == TM_SBREP) {
+			if (!g_sbdrag) { KillTimer(h, TM_SBREP); return 0; }
+			sb_page(g_sbdrag == 1 ? -1 : 1);
+			SetTimer(h, TM_SBREP, 220, NULL);
+			return 0;
+		}
 		if (w == TM_KINETIC) {
 			if (abs(g_vel) < 16 || g_down) { KillTimer(h, TM_KINETIC); g_vel = 0; return 0; }
 			{

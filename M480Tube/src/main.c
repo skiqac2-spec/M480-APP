@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "3.3"
+#define VERSION   "3.4"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -35,6 +35,7 @@ unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th)
 #define TM_PLAYER 1
 #define TM_KINETIC 2
 #define TM_HOLD 3
+#define TM_SBREP 9
 
 #ifdef _WIN32_WCE
 #define THREAD_FLAGS 0x00010000
@@ -137,10 +138,10 @@ static int g_bbw, g_bbh, g_bbstride;
 
 /* touch */
 static int g_down, g_dragging, g_down_y, g_down_x, g_last_y, g_down_scroll;
-static int g_sbdrag, g_sboff;   /* dragging the scroll handle on the right */
+static int g_sbdrag;            /* holding a scroll button: 1 up, 2 down */
 static int g_nofire;            /* this touch stopped a fling: don't open anything */
-#define SB_W 30                 /* scroll handle width (touch area) */
-#define SB_TH 52                /* scroll handle height */
+#define SB_BS 40                /* fixed scroll buttons (bottom right): size */
+#define SB_GAP 6
 static DWORD g_last_t;
 static int g_vel;
 static int g_pressed = -1, g_pressed_ch;
@@ -1604,6 +1605,60 @@ static void make_backbuffer(int w, int h)
 	g_bbstride = ((w * 2 + 3) & ~3) / 2;
 }
 
+/* ---------------- fixed see-through scroll buttons ---------------- */
+static void sb_rects(int w, int h, RECT *up, RECT *dn)
+{
+	SetRect(dn, w - SB_BS - SB_GAP, h - SB_BS - SB_GAP, w - SB_GAP, h - SB_GAP);
+	SetRect(up, dn->left, dn->top - SB_BS - SB_GAP, dn->right, dn->top - SB_GAP);
+}
+
+/* darken/tint a back-buffer rectangle: a = 0..256 amount of colour c (RGB565) */
+static void blend_rect(int x0, int y0, int x1, int y1, unsigned short c, int a)
+{
+	int x, y, cr = c >> 11, cg = (c >> 5) & 63, cb = c & 31;
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > g_bbw) x1 = g_bbw;
+	if (y1 > g_bbh) y1 = g_bbh;
+	for (y = y0; y < y1; y++) {
+		unsigned short *p = g_bbits + y * g_bbstride;
+		for (x = x0; x < x1; x++) {
+			unsigned v = p[x];
+			int r = v >> 11, g = (v >> 5) & 63, b = v & 31;
+			r += ((cr - r) * a) >> 8;
+			g += ((cg - g) * a) >> 8;
+			b += ((cb - b) * a) >> 8;
+			p[x] = (unsigned short)((r << 11) | (g << 5) | b);
+		}
+	}
+}
+
+static void sb_draw(const RECT *r, int up, int pressed, int enabled)
+{
+	int cx = (r->left + r->right) / 2, cy = (r->top + r->bottom) / 2, k;
+	unsigned short ac = enabled ? 0xFFFF : 0x8410;
+	/* rounded-ish see-through square */
+	blend_rect(r->left + 2, r->top, r->right - 2, r->bottom, pressed ? 0xE104 : 0x0000, pressed ? 200 : 140);
+	blend_rect(r->left, r->top + 2, r->left + 2, r->bottom - 2, pressed ? 0xE104 : 0x0000, pressed ? 200 : 140);
+	blend_rect(r->right - 2, r->top + 2, r->right, r->bottom - 2, pressed ? 0xE104 : 0x0000, pressed ? 200 : 140);
+	for (k = 0; k < 9; k++) {               /* arrow */
+		int yy = up ? cy - 5 + k : cy + 4 - k;
+		blend_rect(cx - k, yy, cx + k + 1, yy + 1, ac, enabled ? 230 : 140);
+	}
+}
+
+static void maybe_load_more(void);
+/* page the list up (dir -1) or down (+1) */
+static void sb_page(int dir)
+{
+	View *v = cur();
+	int before = v->scroll;
+	v->scroll += dir * list_height() * 85 / 100;
+	clamp_scroll();
+	if (dir > 0) maybe_load_more();
+	if (v->scroll != before) list_invalidate();
+}
+
 /* copy a cached thumbnail (w x h) to the back buffer at x,y, clipped */
 static void blit_thumb(const unsigned short *px, int x, int y, int w, int h)
 {
@@ -1750,21 +1805,13 @@ static void paint_list(HDC dc, int w, int h)
 	}
 	LeaveCriticalSection(&g_lcs);
 	{
-		/* scroll handle on the right: drag it to move through the list without touching videos */
+		/* fixed see-through ▲ / ▼ buttons at the bottom right: page up / down */
 		int chh = content_height(v);
-		if (chh > h && h > SB_TH) {
-			int by = (int)((long)v->scroll * (h - SB_TH) / (chh - h));
-			int x0 = w - SB_W + 3, x1 = w - 2, cx = (x0 + x1) / 2, k;
-			COLORREF hc = g_sbdrag ? T->barbtn : T->ph;
-			fill(g_bbdc, w - 3, 0, w - 1, h, T->sep);                    /* track */
-			fill(g_bbdc, x0 - 1, by - 1, x1 + 1, by + SB_TH + 1, T->sep); /* border */
-			fill(g_bbdc, x0, by, x1, by + SB_TH, hc);
-			for (k = 0; k < 6; k++) {                                     /* up / down arrows */
-				fill(g_bbdc, cx - k, by + 8 + k, cx + k + 1, by + 9 + k, T->fg);
-				fill(g_bbdc, cx - k, by + SB_TH - 9 - k, cx + k + 1, by + SB_TH - 8 - k, T->fg);
-			}
-			fill(g_bbdc, x0 + 6, by + SB_TH / 2 - 3, x1 - 6, by + SB_TH / 2 - 2, T->fg);  /* grip */
-			fill(g_bbdc, x0 + 6, by + SB_TH / 2 + 1, x1 - 6, by + SB_TH / 2 + 2, T->fg);
+		if (chh > h && h > 2 * SB_BS + 3 * SB_GAP) {
+			RECT up, dn;
+			sb_rects(w, h, &up, &dn);
+			sb_draw(&up, 1, g_sbdrag == 1, v->scroll > 0);
+			sb_draw(&dn, 0, g_sbdrag == 2, v->scroll < chh - h || v->list.cont != NULL);
 		}
 	}
 	BitBlt(dc, 0, content_top(), w, h, g_bbdc, 0, 0, SRCCOPY);
@@ -2367,20 +2414,23 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		{
 			View *v = cur();
 			int lh = list_height(), chh = content_height(v);
-			if (x >= cr.right - SB_W && chh > lh && lh > SB_TH) {
-				int ly = y - content_top();
-				int by = (int)((long)v->scroll * (lh - SB_TH) / (chh - lh));
-				g_sbdrag = 1;
-				g_sboff = (ly >= by && ly < by + SB_TH) ? ly - by : SB_TH / 2;   /* tap the track: jump there */
-				g_down = 0;
-				g_pressed = -1;
-				SetCapture(h);
-				if (g_sboff == SB_TH / 2 && !(ly >= by && ly < by + SB_TH)) {
-					v->scroll = (int)((long)(ly - g_sboff) * (chh - lh) / (lh - SB_TH));
-					clamp_scroll();
+			if (chh > lh && lh > 2 * SB_BS + 3 * SB_GAP && y >= content_top()) {
+				RECT up, dn;
+				POINT lp;
+				lp.x = x; lp.y = y - content_top();
+				sb_rects(cr.right, lh, &up, &dn);
+				InflateRect(&up, 4, 3);
+				InflateRect(&dn, 4, 3);
+				if (PtInRect(&up, lp) || PtInRect(&dn, lp)) {
+					g_sbdrag = PtInRect(&up, lp) ? 1 : 2;
+					g_down = 0;
+					g_pressed = -1;
+					SetCapture(h);
+					sb_page(g_sbdrag == 1 ? -1 : 1);
+					SetTimer(h, TM_SBREP, 450, NULL);   /* keep holding: keeps paging */
+					list_invalidate();
+					return 0;
 				}
-				list_invalidate();
-				return 0;
 			}
 		}
 		g_down = 1;
@@ -2396,16 +2446,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		return 0;
 	}
 	case WM_MOUSEMOVE:
-		if (g_sbdrag) {
-			View *v = cur();
-			int y = (short)HIWORD(l), lh = list_height(), chh = content_height(v);
-			if (chh > lh && lh > SB_TH) {
-				v->scroll = (int)((long)(y - content_top() - g_sboff) * (chh - lh) / (lh - SB_TH));
-				clamp_scroll();
-				list_invalidate();
-			}
-			return 0;
-		}
+		if (g_sbdrag) return 0;
 		if (g_down) {
 			int x = (short)LOWORD(l), y = (short)HIWORD(l);
 			DWORD t = GetTickCount();
@@ -2426,6 +2467,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		KillTimer(h, TM_HOLD);
 		if (g_sbdrag) {
 			g_sbdrag = 0;
+			KillTimer(h, TM_SBREP);
 			ReleaseCapture();
 			maybe_load_more();
 			list_invalidate();
@@ -2446,6 +2488,12 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		}
 		return 0;
 	case WM_TIMER:
+		if (w == TM_SBREP) {
+			if (!g_sbdrag) { KillTimer(h, TM_SBREP); return 0; }
+			sb_page(g_sbdrag == 1 ? -1 : 1);
+			SetTimer(h, TM_SBREP, 220, NULL);
+			return 0;
+		}
 		if (w == TM_KINETIC) {
 			View *v = cur();
 			int before = v->scroll;
