@@ -20,7 +20,7 @@ M480Home/README.txt	-	사용 설명서
 M480Emu/M480Emu.cab	-	설치 파일 - 누르면 설치 (설치 위치는 Storage Card 권장)
 M480Emu/M480Emu.zip	-	설치 없이 쓰는 폴더 (압축 풀어 M480Emu 폴더째 복사)
 M480Emu/README.txt	-	사용 설명서 (터치 버튼·키 배치·속도 설정)
-@M480Call	M480 통화 0.1 테스트판 (폰에 블루투스 핸즈프리로 연결)	2026-11-26
+@M480Call	M480 통화 0.2 테스트판 (아이폰에 블루투스 핸즈프리로 연결)	2026-11-27 아이폰 페어링 대응
 M480Call/M480Call.cab	-	설치 파일 - 누르면 설치
 M480Call/M480Call.exe	-	설치 없이 쓰는 실행 파일
 M480Call/README.txt	-	사용 설명서 (테스트 순서)
