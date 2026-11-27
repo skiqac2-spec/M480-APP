@@ -295,6 +295,14 @@ void entropy_get(unsigned char out[32])
 
 /* ---------------- characters the phone font lacks ---------------- */
 #include "glyphmap.h"
+WCHAR glyph_map(WCHAR c)
+{
+	WCHAR t[2];
+	t[0] = c; t[1] = 0;
+	glyph_fix(t);
+	return t[0];
+}
+
 void glyph_fix(WCHAR *w)
 {
 	WCHAR *o = w;

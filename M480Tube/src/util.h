@@ -42,6 +42,8 @@ int  wcsieq_a(const WCHAR *w, int wlen, const char *a); /* compare wide (len) wi
 WCHAR *utf8_to_w(const char *s, int len, int *outlen);
 /* swap characters the phone font can't draw (shown as boxes) for look-alikes, drop emoji */
 void glyph_fix(WCHAR *w);
+/* one character: the look-alike, the same character, or 0 (dropped) */
+WCHAR glyph_map(WCHAR c);
 char  *w_to_utf8(const WCHAR *w, int len);
 char  *w_to_cp(const WCHAR *w, int len, UINT cp);
 WCHAR *cp_to_w(const char *s, int len, UINT cp, int *outlen);

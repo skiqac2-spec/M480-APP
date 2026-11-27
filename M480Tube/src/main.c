@@ -6,6 +6,8 @@
 #include "net.h"
 #include "url.h"
 #include "yt.h"
+#include "json.h"
+#include "ime.h"
 #include "player.h"
 #include "tubelog.h"
 #include <stdio.h>
@@ -20,7 +22,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "3.6"
+#define VERSION   "3.7"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -30,12 +32,14 @@ unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th)
 #define WM_APP_CONFIG   (WM_APP + 4)
 #define WM_APP_PROGRESS (WM_APP + 5)
 #define WM_APP_PART     (WM_APP + 6)
+#define WM_APP_IME      (WM_APP + 7)
 
 #define ID_EDIT 100
 #define TM_PLAYER 1
 #define TM_KINETIC 2
 #define TM_HOLD 3
 #define TM_SBREP 9
+#define TM_IME 10
 
 #ifdef _WIN32_WCE
 #define THREAD_FLAGS 0x00010000
@@ -106,7 +110,7 @@ static HFONT g_font, g_fontb, g_fonts;
 static int g_topbar = 32, g_tabbar = 26, g_status_h = 18;
 static char g_status[300];
 
-static int g_quality = 0, g_start_ori = ORI_LAND_LEFT, g_stats = 1, g_grid = 0, g_dark = 0;
+static int g_quality = 0, g_start_ori = ORI_LAND_LEFT, g_stats = 1, g_grid = 0, g_dark = 0, g_ime = 0;
 
 static CRITICAL_SECTION g_lcs;     /* protects views and the thumbnail cache */
 static HANDLE g_thumb_ev;
@@ -191,6 +195,7 @@ static void settings_load(void)
 		else if (!strncmp(line, "stats=", 6)) g_stats = atoi(line + 6);
 		else if (!strncmp(line, "grid=", 5)) g_grid = atoi(line + 5);
 		else if (!strncmp(line, "dark=", 5)) g_dark = atoi(line + 5);
+		else if (!strncmp(line, "jp=", 3)) g_ime = atoi(line + 3);
 	}
 	fclose(f);
 	if (g_quality < 0 || g_quality > 2) g_quality = 0;
@@ -204,7 +209,7 @@ static void settings_save(void)
 	app_path(p, L"m480tube.ini");
 	f = _wfopen(p, L"wb");
 	if (!f) return;
-	fprintf(f, "quality=%d\r\norientation=%d\r\nstats=%d\r\ngrid=%d\r\ndark=%d\r\n", g_quality, g_start_ori, g_stats, g_grid, g_dark);
+	fprintf(f, "quality=%d\r\norientation=%d\r\nstats=%d\r\ngrid=%d\r\ndark=%d\r\njp=%d\r\n", g_quality, g_start_ori, g_stats, g_grid, g_dark, g_ime);
 	fclose(f);
 }
 
@@ -628,6 +633,9 @@ static void msgbox_u8(const char *s, UINT flags)
 
 /* ---------------- geometry ---------------- */
 static View *cur(void);
+static void ime_clear(void);
+static void ime_restore(WCHAR *w);
+static void ime_paint(HDC dc, int w);
 /* channel pages have a second row: [동영상] [지난 라이브] [정렬] */
 static int content_top(void) { return g_topbar + g_tabbar + (cur()->kind == V_CHANNEL ? g_tabbar : 0); }
 static void chan_tab_rects(int w, RECT *vid, RECT *live, RECT *sortr)
@@ -1301,6 +1309,8 @@ static void do_search_from_edit(void)
 	char *q;
 	int n = GetWindowTextW(g_edit, w, 299);
 	w[n < 0 ? 0 : n] = 0;
+	if (g_ime) { n = ime_finish(w, n); ime_clear(); }
+	ime_restore(w);
 	q = w_to_utf8(w, -1);
 	if (q && q[0]) {
 		sip_show(0);
@@ -1956,6 +1966,12 @@ static void paint_main(HDC dc)
 	SetRect(&r, cr.right - 78, 0, cr.right - 34, g_topbar);
 	fill(dc, r.left + 2, 4, r.right - 2, g_topbar - 4, T->barbtn);
 	text_u8(dc, "검색", &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	/* Japanese input on/off */
+	SetRect(&r, cr.right - 112, 0, cr.right - 80, g_topbar);
+	fill(dc, r.left + 2, 4, r.right - 2, g_topbar - 4, g_ime ? T->barbtn : T->ph);
+	SetTextColor(dc, g_ime ? RGB(255, 255, 255) : T->fg);
+	text_u8(dc, g_ime ? "\xE3\x81\x82" : "A", &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);   /* あ */
+	SetTextColor(dc, T->bartxt);
 	SetRect(&r, cr.right - 32, 0, cr.right, g_topbar);
 	fill(dc, r.left + 2, 4, r.right - 2, g_topbar - 4, T->barbtn);
 	{
@@ -1965,6 +1981,7 @@ static void paint_main(HDC dc)
 		fill(dc, cx - 7, cy + 4, cx + 7, cy + 6, RGB(255, 255, 255));
 	}
 	paint_tabbar(dc, cr.right);
+	ime_paint(dc, cr.right);
 	paint_list(dc, cr.right, list_height());
 	/* status */
 	fill(dc, 0, cr.bottom - g_status_h, cr.right, cr.bottom, T->stbg);
@@ -1978,7 +1995,7 @@ static void layout_children(void)
 {
 	RECT cr;
 	GetClientRect(g_hwnd, &cr);
-	MoveWindow(g_edit, 4, 4, cr.right - 86, g_topbar - 8, TRUE);
+	MoveWindow(g_edit, 4, 4, cr.right - 120, g_topbar - 8, TRUE);
 	clamp_scroll();
 }
 
@@ -2157,6 +2174,255 @@ static void import_subs(void)
 	g_subs_loaded_once = 0;
 	set_tab(1);
 	if (st.added) mgr_open();
+}
+
+/* ---------------- Japanese input ----------------
+   romaji typed into the search box turns into hiragana as you type; a bar of kanji
+   candidates (from Google's input tools service) replaces the tab bar while composing */
+#define IME_MAXC 10
+static char *g_cand[IME_MAXC];
+static int g_cand_ml[IME_MAXC];        /* how many composing characters each candidate covers */
+static RECT g_cand_rc[IME_MAXC];
+static int g_ncand, g_ime_busy, g_ime_commit, g_ime_req;
+static WCHAR g_comp_sent[128];         /* composing text the candidates are for */
+static WCHAR g_rest_src[64], g_rest_dst[64];   /* look-alikes shown in the box -> real characters */
+static int g_nrest;
+
+typedef struct { int id, n; char *cand[IME_MAXC]; int ml[IME_MAXC]; } ImeRes;
+
+static void ime_clear_cands(void)
+{
+	int i;
+	for (i = 0; i < g_ncand; i++) free(g_cand[i]);
+	g_ncand = 0;
+	g_comp_sent[0] = 0;
+	g_ime_req++;
+}
+
+static void ime_clear(void)
+{
+	ime_clear_cands();
+	g_ime_commit = 0;
+	KillTimer(g_hwnd, TM_IME);
+	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static void ime_restore(WCHAR *w)
+{
+	int i, k;
+	for (; *w; w++)
+		for (k = 0; k < g_nrest; k++) if (*w == g_rest_dst[k]) { *w = g_rest_src[k]; break; }
+	(void)i;
+}
+
+/* start of the composing part of t[0..n) */
+static int ime_comp_start(const WCHAR *t, int n)
+{
+	int s = n;
+	if (g_ime_commit > n) g_ime_commit = n;
+	while (s > g_ime_commit && ime_is_comp(t[s - 1])) s--;
+	return s;
+}
+
+static void ime_set_text(const WCHAR *t)
+{
+	int n = (int)wcslen(t);
+	g_ime_busy = 1;
+	SetWindowTextW(g_edit, t);
+	SendMessageW(g_edit, EM_SETSEL, n, n);
+	g_ime_busy = 0;
+}
+
+static void ime_local_cands(const WCHAR *comp)
+{
+	WCHAR k[128];
+	int n = (int)wcslen(comp);
+	ime_clear_cands();
+	wcscpy(g_comp_sent, comp);
+	g_cand[g_ncand] = w_to_utf8(comp, -1); g_cand_ml[g_ncand++] = n;
+	wcscpy(k, comp);
+	ime_katakana(k, n);
+	if (wcscmp(k, comp)) { g_cand[g_ncand] = w_to_utf8(k, -1); g_cand_ml[g_ncand++] = n; }
+}
+
+static void ime_on_change(void)
+{
+	WCHAR t[300], comp[128];
+	int n, s, i, kana = 0;
+	DWORD a = 0, b = 0;
+	if (!g_ime || g_ime_busy) return;
+	n = GetWindowTextW(g_edit, t, 299);
+	if (n < 0) n = 0;
+	t[n] = 0;
+	if (!n) { g_nrest = 0; ime_clear(); return; }
+	SendMessageW(g_edit, EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
+	if ((int)b != n) return;                       /* only while typing at the end */
+	s = ime_comp_start(t, n);
+	{
+		WCHAR before[300];
+		wcscpy(before, t);
+		n = ime_romaji(t, n, s);
+		if (wcscmp(before, t)) ime_set_text(t);
+	}
+	for (i = s; i < n && i - s < 120; i++) { comp[i - s] = t[i]; if (t[i] >= 0x3041 && t[i] <= 0x30FF) kana = 1; }
+	comp[i - s] = 0;
+	if (!kana) { if (g_ncand) { ime_clear_cands(); InvalidateRect(g_hwnd, NULL, FALSE); } return; }
+	{
+		WCHAR f[128];
+		wcscpy(f, comp);
+		ime_finish(f, (int)wcslen(f));
+		if (!wcscmp(f, g_comp_sent)) return;
+		ime_local_cands(f);
+	}
+	SetTimer(g_hwnd, TM_IME, 350, NULL);           /* ask for kanji once typing pauses */
+	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static DWORD WINAPI ime_thread(LPVOID arg)
+{
+	ImeRes *r = (ImeRes *)arg;
+	char *u = (char *)r->cand[0], *q = url_encode(u), url[900];
+	HttpResp hr;
+	NetCtl ctl;
+	r->cand[0] = NULL;
+	memset(&hr, 0, sizeof hr);
+	memset(&ctl, 0, sizeof ctl);
+	_snprintf(url, sizeof url, "https://inputtools.google.com/request?text=%s&itc=ja-t-i0-und&num=8&cp=0&cs=1&ie=utf-8&oe=utf-8&app=m480tube", q ? q : "");
+	url[sizeof url - 1] = 0;
+	free(q);
+	free(u);
+	if (http_request(url, "GET", NULL, 0, NULL, NULL, &hr, &ctl, 64 * 1024) && hr.status == 200) {
+		JDoc *d = json_parse(hr.body.p, hr.body.len);
+		JNode *root = d ? json_root(d) : NULL;
+		const char *ok = jstr(jidx(root, 0));
+		JNode *seg = jidx(jidx(root, 1), 0), *cl = jidx(seg, 1), *ml = jpath(seg, "3.matched_length");
+		int i;
+		if (ok && !strcmp(ok, "SUCCESS"))
+			for (i = 0; i < IME_MAXC && jidx(cl, i); i++) {
+				const char *c = jstr(jidx(cl, i));
+				if (!c || !c[0]) continue;
+				r->cand[r->n] = xstrdup(c);
+				r->ml[r->n] = ml ? (int)jnum(jidx(ml, i), -1) : -1;
+				r->n++;
+			}
+		if (d) json_free(d);
+	} else tube_log("ime: request failed (%d) %s", hr.status, hr.err);
+	http_resp_free(&hr);
+	PostMessageW(g_hwnd, WM_APP_IME, 0, (LPARAM)r);
+	return 0;
+}
+
+static void ime_fetch(void)
+{
+	ImeRes *r;
+	HANDLE th;
+	if (!g_ime || !g_comp_sent[0]) return;
+	r = (ImeRes *)calloc(1, sizeof(ImeRes));
+	r->id = g_ime_req;
+	r->cand[0] = w_to_utf8(g_comp_sent, -1);
+	th = CreateThread(NULL, 0, ime_thread, r, 0, NULL);
+	if (th) CloseHandle(th); else { free(r->cand[0]); free(r); }
+}
+
+static void ime_result(ImeRes *r)
+{
+	int i;
+	if (r->id == g_ime_req && g_ime && r->n) {
+		int full = (int)wcslen(g_comp_sent);
+		WCHAR keep[128];
+		wcscpy(keep, g_comp_sent);
+		for (i = 0; i < g_ncand; i++) free(g_cand[i]);
+		g_ncand = 0;
+		for (i = 0; i < r->n && g_ncand < IME_MAXC; i++) {
+			g_cand[g_ncand] = r->cand[i];
+			g_cand_ml[g_ncand] = (r->ml[i] > 0 && r->ml[i] <= full) ? r->ml[i] : full;
+			g_ncand++;
+			r->cand[i] = NULL;
+		}
+		wcscpy(g_comp_sent, keep);
+		InvalidateRect(g_hwnd, NULL, FALSE);
+	}
+	for (i = 0; i < r->n; i++) free(r->cand[i]);
+	free(r);
+}
+
+/* put candidate i in place of the composing text it covers */
+static void ime_pick(int i)
+{
+	WCHAR t[300], *cw, out[300];
+	int n, s, ml, k, o;
+	if (i < 0 || i >= g_ncand) return;
+	n = GetWindowTextW(g_edit, t, 299);
+	if (n < 0) n = 0;
+	t[n] = 0;
+	n = ime_finish(t, n);
+	s = ime_comp_start(t, n);
+	ml = g_cand_ml[i];
+	if (s + ml > n) ml = n - s;
+	cw = utf8_to_w(g_cand[i], -1, NULL);
+	if (!cw) return;
+	/* the box can't draw some kanji: show a look-alike, remember the real one for searching */
+	for (k = 0; cw[k]; k++) {
+		WCHAR m = glyph_map(cw[k]);
+		if (m && m != cw[k] && g_nrest < 64) {
+			int j;
+			for (j = 0; j < g_nrest && g_rest_dst[j] != m; j++) ;
+			if (j == g_nrest) { g_rest_src[g_nrest] = cw[k]; g_rest_dst[g_nrest++] = m; }
+			cw[k] = m;
+		}
+	}
+	o = 0;
+	for (k = 0; k < s && o < 290; k++) out[o++] = t[k];
+	for (k = 0; cw[k] && o < 290; k++) out[o++] = cw[k];
+	g_ime_commit = o;
+	for (k = s + ml; k < n && o < 298; k++) out[o++] = t[k];
+	out[o] = 0;
+	free(cw);
+	ime_clear_cands();
+	ime_set_text(out);
+	SetFocus(g_edit);
+	/* something left to convert? */
+	if (g_ime_commit < o) ime_on_change();
+	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static void ime_toggle(void)
+{
+	g_ime = !g_ime;
+	ime_clear();
+	settings_save();
+	status_set(g_ime ? "일본어 입력: 영문 자판으로 로마자를 치세요 (sakura -> さくら), 위 줄에서 한자 고르기"
+	                 : "일본어 입력 끔");
+	SetFocus(g_edit);
+	InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+/* the candidate bar, drawn over the tab bar while composing */
+static void ime_paint(HDC dc, int w)
+{
+	int i, x = 2, y0 = g_topbar, y1 = g_topbar + g_tabbar;
+	if (!g_ime || !g_ncand) return;
+	fill(dc, 0, y0, w, y1, T->editbg);
+	fill(dc, 0, y1 - 1, w, y1, T->barbtn);
+	SelectObject(dc, g_fontb);
+	SetBkMode(dc, TRANSPARENT);
+	for (i = 0; i < g_ncand; i++) {
+		WCHAR *cw = utf8_to_w(g_cand[i], -1, NULL);
+		SIZE sz;
+		int bw;
+		SetRectEmpty(&g_cand_rc[i]);
+		if (!cw) continue;
+		glyph_fix(cw);
+		GetTextExtentPoint32W(dc, cw, (int)wcslen(cw), &sz);
+		bw = sz.cx + 14;
+		if (x + bw > w - 2) { free(cw); break; }
+		SetRect(&g_cand_rc[i], x, y0 + 2, x + bw, y1 - 3);
+		fill(dc, x, y0 + 2, x + bw, y1 - 3, i == 0 ? T->barbtn : T->ph);
+		SetTextColor(dc, i == 0 ? RGB(255, 255, 255) : T->fg);
+		DrawTextW(dc, cw, -1, &g_cand_rc[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+		free(cw);
+		x += bw + 3;
+	}
 }
 
 /* ---------------- input ---------------- */
@@ -2376,6 +2642,12 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		if (y < g_topbar) {
 			if (x >= cr.right - 32) show_menu();
 			else if (x >= cr.right - 78) do_search_from_edit();
+			else if (x >= cr.right - 114) ime_toggle();
+			return 0;
+		}
+		if (g_ime && g_ncand && y < g_topbar + g_tabbar) {
+			int i;
+			for (i = 0; i < g_ncand; i++) if (PtInRect(&g_cand_rc[i], pt)) { ime_pick(i); break; }
 			return 0;
 		}
 		if (y < content_top()) {
@@ -2498,6 +2770,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		}
 		return 0;
 	case WM_TIMER:
+		if (w == TM_IME) { KillTimer(h, TM_IME); ime_fetch(); return 0; }
 		if (w == TM_SBREP) {
 			if (!g_sbdrag) { KillTimer(h, TM_SBREP); return 0; }
 			sb_step(g_sbdrag == 1 ? -1 : 1);
@@ -2540,6 +2813,10 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		return 0;
 	}
 	case WM_COMMAND:
+		if (LOWORD(w) == ID_EDIT) {
+			if (HIWORD(w) == EN_CHANGE) ime_on_change();
+			return 0;
+		}
 		switch (LOWORD(w)) {
 		case M_Q240: g_quality = 0; settings_save(); return 0;
 		case M_Q144: g_quality = 1; settings_save(); return 0;
@@ -2632,6 +2909,9 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		break;
 	case WM_APP_JOB:
 		on_job((Job *)l);
+		return 0;
+	case WM_APP_IME:
+		ime_result((ImeRes *)l);
 		return 0;
 	case WM_APP_PART:
 		on_feed_part((FeedPart *)l);

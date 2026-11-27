@@ -4,7 +4,7 @@
 
 WEB := ../M480Web
 BEARSSL_SRC := $(wildcard $(WEB)/third_party/bearssl/src/*/*.c)
-APP_SRC := src/main.c src/net.c src/url.c src/util.c src/json.c src/yt.c src/player.c src/img.c src/tubelog.c
+APP_SRC := src/main.c src/net.c src/url.c src/util.c src/json.c src/yt.c src/player.c src/img.c src/tubelog.c src/ime.c
 CE_SRC := src/ce_compat.c
 INC := -Isrc -I$(WEB)/third_party -I$(WEB)/third_party/bearssl/inc -I$(WEB)/third_party/bearssl/src
 BRDEFS := -DBR_USE_UNIX_TIME=0 -DBR_USE_WIN32_TIME=0 -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0
