@@ -105,6 +105,7 @@ static int g_down, g_dragging, g_down_x, g_down_y, g_last_y, g_press_link = -1, 
 static DWORD g_last_t;
 static int g_vel;      /* px per 25ms * 16 */
 static int g_sbdrag;            /* holding a scroll button: 1 up, 2 down */
+static DWORD g_sbt0;            /* when it was pressed */
 static int g_nofire;            /* this touch stopped a fling: don't open anything */
 #define SB_BS  40               /* fixed see-through scroll buttons (bottom right, like M480Tube) */
 #define SB_GAP 6
@@ -1911,10 +1912,12 @@ static void sb_draw(HDC dc, const RECT *r, int up, int pressed, int enabled)
 	}
 }
 
-/* page up (dir -1) or down (+1) */
-static void sb_page(int dir)
+/* holding a scroll button: smooth scroll that speeds up the longer it is held */
+static void sb_step(int dir)
 {
-	set_scroll(g_scroll + dir * (view_height() * 85 / 100));
+	int ms = (int)(GetTickCount() - g_sbt0), step = 3 + ms / 45;
+	if (step > 26) step = 26;
+	set_scroll(g_scroll + dir * step);
 }
 
 static void update_scrollbar(void)
@@ -2188,8 +2191,9 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 					g_sbdrag = PtInRect(&up, pt) ? 1 : 2;
 					g_down = 0;
 					g_press_link = g_press_ctl = -1;
-					sb_page(g_sbdrag == 1 ? -1 : 1);
-					SetTimer(g_hwnd, TM_SBREP, 450, NULL);   /* keep holding: keeps paging */
+					g_sbt0 = GetTickCount();
+					sb_step(g_sbdrag == 1 ? -1 : 1);
+					SetTimer(g_hwnd, TM_SBREP, 25, NULL);    /* scrolls smoothly while held */
 					InvalidateRect(h, NULL, FALSE);
 					return 0;
 				}
@@ -2235,7 +2239,18 @@ static LRESULT CALLBACK view_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 		int link = g_press_link, ctl = g_press_ctl;
 		KillTimer(g_hwnd, TM_HOLD);
 		ReleaseCapture();
-		if (g_sbdrag) { g_sbdrag = 0; KillTimer(g_hwnd, TM_SBREP); InvalidateRect(h, NULL, FALSE); return 0; }
+		if (g_sbdrag) {
+			int dir = g_sbdrag == 1 ? -1 : 1;
+			g_sbdrag = 0;
+			KillTimer(g_hwnd, TM_SBREP);
+			/* a quick tap glides about a third of a screen; a hold stops right where let go */
+			if (GetTickCount() - g_sbt0 < 220) {
+				g_vel = dir * (view_height() / 3) * 16 * 8 / 100;
+				SetTimer(g_hwnd, TM_KINETIC, 25, NULL);
+			}
+			InvalidateRect(h, NULL, FALSE);
+			return 0;
+		}
 		if (!g_down) return 0;
 		g_down = 0;
 		g_press_link = g_press_ctl = -1;
@@ -2906,8 +2921,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 	case WM_TIMER:
 		if (w == TM_SBREP) {
 			if (!g_sbdrag) { KillTimer(h, TM_SBREP); return 0; }
-			sb_page(g_sbdrag == 1 ? -1 : 1);
-			SetTimer(h, TM_SBREP, 220, NULL);
+			sb_step(g_sbdrag == 1 ? -1 : 1);
 			return 0;
 		}
 		if (w == TM_KINETIC) {

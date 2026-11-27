@@ -20,7 +20,7 @@
 
 #define APPNAME   L"M480Tube"
 #define PLAYCLASS L"M480TubePlayer"
-#define VERSION   "3.4"
+#define VERSION   "3.5"
 
 unsigned short *thumb_decode(const unsigned char *data, int len, int tw, int th);
 
@@ -139,6 +139,7 @@ static int g_bbw, g_bbh, g_bbstride;
 /* touch */
 static int g_down, g_dragging, g_down_y, g_down_x, g_last_y, g_down_scroll;
 static int g_sbdrag;            /* holding a scroll button: 1 up, 2 down */
+static DWORD g_sbt0;            /* when it was pressed */
 static int g_nofire;            /* this touch stopped a fling: don't open anything */
 #define SB_BS 40                /* fixed scroll buttons (bottom right): size */
 #define SB_GAP 6
@@ -1648,12 +1649,13 @@ static void sb_draw(const RECT *r, int up, int pressed, int enabled)
 }
 
 static void maybe_load_more(void);
-/* page the list up (dir -1) or down (+1) */
-static void sb_page(int dir)
+/* holding a scroll button: smooth scroll that speeds up the longer it is held */
+static void sb_step(int dir)
 {
 	View *v = cur();
-	int before = v->scroll;
-	v->scroll += dir * list_height() * 85 / 100;
+	int before = v->scroll, ms = (int)(GetTickCount() - g_sbt0), step = 3 + ms / 45;
+	if (step > 26) step = 26;
+	v->scroll += dir * step;
 	clamp_scroll();
 	if (dir > 0) maybe_load_more();
 	if (v->scroll != before) list_invalidate();
@@ -2426,8 +2428,9 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 					g_down = 0;
 					g_pressed = -1;
 					SetCapture(h);
-					sb_page(g_sbdrag == 1 ? -1 : 1);
-					SetTimer(h, TM_SBREP, 450, NULL);   /* keep holding: keeps paging */
+					g_sbt0 = GetTickCount();
+					sb_step(g_sbdrag == 1 ? -1 : 1);
+					SetTimer(h, TM_SBREP, 25, NULL);    /* scrolls smoothly while held */
 					list_invalidate();
 					return 0;
 				}
@@ -2466,9 +2469,15 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 	case WM_LBUTTONUP:
 		KillTimer(h, TM_HOLD);
 		if (g_sbdrag) {
+			int dir = g_sbdrag == 1 ? -1 : 1;
 			g_sbdrag = 0;
 			KillTimer(h, TM_SBREP);
 			ReleaseCapture();
+			/* a quick tap glides about a third of a screen; a hold stops right where let go */
+			if (GetTickCount() - g_sbt0 < 220) {
+				g_vel = dir * (list_height() / 3) * 16 * 7 / 100;
+				SetTimer(h, TM_KINETIC, 25, NULL);
+			}
 			maybe_load_more();
 			list_invalidate();
 			return 0;
@@ -2490,8 +2499,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 	case WM_TIMER:
 		if (w == TM_SBREP) {
 			if (!g_sbdrag) { KillTimer(h, TM_SBREP); return 0; }
-			sb_page(g_sbdrag == 1 ? -1 : 1);
-			SetTimer(h, TM_SBREP, 220, NULL);
+			sb_step(g_sbdrag == 1 ? -1 : 1);
 			return 0;
 		}
 		if (w == TM_KINETIC) {
