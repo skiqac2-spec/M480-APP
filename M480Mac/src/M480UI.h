@@ -62,6 +62,15 @@ LOCALVAR ui3b m480_pg[CLUT_size];
 LOCALVAR ui3b m480_pb[CLUT_size];
 LOCALVAR ui4b m480_p565[CLUT_size];
 
+/*
+	blended color of a 2x2 block, cached by the 4 color indexes
+	(dither patterns and text repeat a lot)
+*/
+#define M480_CacheBits 12
+#define M480_CacheSize (1 << M480_CacheBits)
+LOCALVAR ui5b m480_ckey[M480_CacheSize];
+LOCALVAR ui4b m480_cval[M480_CacheSize];
+
 /* gray for 0..4 black pixels in a 2x2 block (mono mode) */
 LOCALVAR ui4b m480_gray[5];
 /* black pixel pairs of one byte, 4 lanes (one per byte of the result) */
@@ -211,6 +220,14 @@ LOCALFUNC blnr M480_Init(void)
 	memset(m480_fb, 0, M480_W * M480_H * 2);
 	SetBkMode(m480_memdc, TRANSPARENT);
 
+	for (i = 0; i < CLUT_size; ++i) {
+		m480_p565[i] = 0x1234;	/* forces a cache reset on first use */
+	}
+	for (i = 0; i < M480_CacheSize; ++i) {
+		m480_ckey[i] = 0;
+		m480_cval[i] = 0;
+	}
+
 	m480_font = M480_MakeFont(16, trueblnr);
 	m480_fontS = M480_MakeFont(12, falseblnr);
 
@@ -318,16 +335,27 @@ LOCALPROC M480_UpdatePalette(void)
 {
 #if 0 != vMacScreenDepth
 	int i;
+	blnr changed = falseblnr;
 
 	for (i = 0; i < CLUT_size; ++i) {
 		ui3r r = CLUT_reds[i] >> 11;
 		ui3r g = CLUT_greens[i] >> 10;
 		ui3r b = CLUT_blues[i] >> 11;
+		ui4b c = (ui4b)((r << 11) | (g << 5) | b);
 
+		if (c != m480_p565[i]) {
+			changed = trueblnr;
+		}
 		m480_pr[i] = r;
 		m480_pg[i] = g;
 		m480_pb[i] = b;
-		m480_p565[i] = (ui4b)((r << 11) | (g << 5) | b);
+		m480_p565[i] = c;
+	}
+	if (changed) {
+		for (i = 0; i < M480_CacheSize; ++i) {
+			m480_ckey[i] = 0;
+			m480_cval[i] = m480_p565[0];
+		}
 	}
 #endif
 }
@@ -384,19 +412,20 @@ LOCALPROC M480_DrawMac(si4b top, si4b left, si4b bottom, si4b right)
 	if (UseColorMode) {
 		M480_UpdatePalette();
 		for (y = t; y < b; ++y) {
-			ui3b *s0 = cdb + (ui5r)vMacScreenByteWidth * (2 * y) + 2 * l;
-			ui3b *s1 = s0 + vMacScreenByteWidth;
+			ui4b *s0 = (ui4b *)(cdb
+				+ (ui5r)vMacScreenByteWidth * (2 * y) + 2 * l);
+			ui4b *s1 = (ui4b *)((ui3b *)s0 + vMacScreenByteWidth);
 			ui4b *d = m480_fb + y * M480_W + l;
 
 			for (x = r - l; --x >= 0; ) {
-				ui3r a0 = s0[0];
-				ui3r a1 = s0[1];
-				ui3r a2 = s1[0];
-				ui3r a3 = s1[1];
+				ui5r k = (ui5r)*s0++ | ((ui5r)*s1++ << 16);
+				ui5r h = (k * 2654435761UL) >> (32 - M480_CacheBits);
 
-				if ((a0 == a1) && (a0 == a2) && (a0 == a3)) {
-					*d = m480_p565[a0];
-				} else {
+				if (m480_ckey[h] != k) {
+					ui3r a0 = k & 0xFF;
+					ui3r a1 = (k >> 8) & 0xFF;
+					ui3r a2 = (k >> 16) & 0xFF;
+					ui3r a3 = k >> 24;
 					int sum;
 					int mn;
 					int cr;
@@ -412,11 +441,10 @@ LOCALPROC M480_DrawMac(si4b top, si4b left, si4b bottom, si4b right)
 					M480_Mix(m480_pb[a0], m480_pb[a1],
 						m480_pb[a2], m480_pb[a3], sum, mn);
 					cb = (3 * sum + 4 * mn) >> 4;
-					*d = (ui4b)((cr << 11) | (cg << 5) | cb);
+					m480_ckey[h] = k;
+					m480_cval[h] = (ui4b)((cr << 11) | (cg << 5) | cb);
 				}
-				++d;
-				s0 += 2;
-				s1 += 2;
+				*d++ = m480_cval[h];
 			}
 		}
 	} else
