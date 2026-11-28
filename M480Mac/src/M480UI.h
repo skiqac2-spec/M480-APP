@@ -263,6 +263,42 @@ LOCALPROC M480_Blit(int x, int y, int w, int h)
 	}
 }
 
+LOCALPROC M480_FillRect(RECT *rc, COLORREF c)
+{
+	HBRUSH br = CreateSolidBrush(c);
+	FillRect(m480_memdc, rc, br);
+	DeleteObject(br);
+}
+
+LOCALPROC M480_Text(LPCTSTR s, RECT *rc, COLORREF c, HFONT f, UINT fmt)
+{
+	HFONT old = (HFONT)SelectObject(m480_memdc, f);
+	SetTextColor(m480_memdc, c);
+	DrawText(m480_memdc, s, -1, rc, fmt);
+	SelectObject(m480_memdc, old);
+}
+
+/* shown instead of the (tiny, English) Mini vMac message */
+LOCALPROC M480_DrawNoRom(void)
+{
+	RECT rc;
+
+	rc.left = 0;
+	rc.top = 0;
+	rc.right = M480_W;
+	rc.bottom = M480_MacH;
+	M480_FillRect(&rc, RGB(30, 34, 46));
+	rc.left = 12;
+	rc.right = M480_W - 12;
+	rc.top = 30;
+	M480_Text(TEXT("M480Mac (Mac II, 256색)\n\n")
+		TEXT("ROM 파일(MacII.ROM)이 없습니다.\n\n")
+		TEXT("저장 카드\\M480Mac 폴더나\n설치 폴더에 넣고 다시 켜거나,\n")
+		TEXT("아래 [디스크] 버튼으로 고르세요."),
+		&rc, RGB(240, 240, 240), m480_font, DT_CENTER | DT_WORDBREAK);
+	M480_Blit(0, 0, M480_W, M480_MacH);
+}
+
 /* --- Mac screen, half size --- */
 
 LOCALPROC M480_UpdatePalette(void)
@@ -301,6 +337,11 @@ LOCALPROC M480_DrawMac(si4b top, si4b left, si4b bottom, si4b right)
 	int y;
 
 	if ((NULL == m480_fb) || m480_listMode) {
+		return;
+	}
+
+	if (! ROM_loaded) {
+		M480_DrawNoRom();
 		return;
 	}
 
@@ -423,21 +464,6 @@ LOCALFUNC int M480_ButtonAt(int x, int y)
 	col = x / (M480_W / 4);
 	row = (y - M480_BarY) / (M480_BarH / 2);
 	return row * 4 + col;
-}
-
-LOCALPROC M480_FillRect(RECT *rc, COLORREF c)
-{
-	HBRUSH br = CreateSolidBrush(c);
-	FillRect(m480_memdc, rc, br);
-	DeleteObject(br);
-}
-
-LOCALPROC M480_Text(LPCTSTR s, RECT *rc, COLORREF c, HFONT f, UINT fmt)
-{
-	HFONT old = (HFONT)SelectObject(m480_memdc, f);
-	SetTextColor(m480_memdc, c);
-	DrawText(m480_memdc, s, -1, rc, fmt);
-	SelectObject(m480_memdc, old);
 }
 
 LOCALPROC M480_DrawBar(void)

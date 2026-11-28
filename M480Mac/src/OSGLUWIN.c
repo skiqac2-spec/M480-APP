@@ -3276,6 +3276,7 @@ LOCALFUNC blnr ReCreateMainWindow(void)
 	ViewHSize = vMacScreenWidth;
 	ViewVSize = vMacScreenHeight;
 	M480_FullScreen();
+	M480_Paint();
 	(void) InvalidateRect(MainWnd, NULL, FALSE);
 #endif
 
@@ -4820,7 +4821,13 @@ LOCALPROC InsertADisk0(void)
 
 	MyBeginDialog();
 	if (M480_ChooseDisk(p)) {
-		(void) InsertDiskOrAlias(p, trueblnr, falseblnr);
+		LPTSTR dot = _tcsrchr(p, (TCHAR)('.'));
+		blnr isRom = (NULL != dot) && (0 == _tcsicmp(dot, TEXT(".rom")));
+
+		(void) InsertDiskOrAlias(p, isRom, falseblnr);
+		if (isRom && ROM_loaded) {
+			M480_Paint();
+		}
 	}
 	MyEndDialog();
 	CtrlMode = falseblnr;
