@@ -29,3 +29,8 @@ M480Nico/build/
 M480Nico/ffmpeg-win/
 M480Nico/ffmpeg-ce/
 M480Nico/out/
+
+# M480Mac: ROM/디스크 이미지는 올리지 않음
+M480Mac/build/
+M480Mac/out/
+*.ROM
