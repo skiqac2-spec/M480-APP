@@ -20,6 +20,8 @@
 #define UseTimerThread 0
 #define WantOSGLUWIN 1
 #define M480UI 1
+#define MyTimeResolution 0
+#define timeGetTime GetTickCount
 #ifdef _tWinMain
 #undef _tWinMain
 #endif

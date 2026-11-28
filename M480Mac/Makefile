@@ -26,7 +26,7 @@ build/res.o: cfg/main.rc
 
 build/M480Mac.exe: $(OBJS)
 	$(CC) $(ARCHF) -o $@ $(OBJS) -Wl,--stack,0x40000 -static-libgcc \
-	  -lcommctrl -laygshell -lmmtimer -lm
+	  -lcommctrl -laygshell -lm
 	cp $@ build/M480Mac-sym.exe
 	$(STRIP) $@
 
