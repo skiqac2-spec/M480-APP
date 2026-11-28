@@ -631,10 +631,11 @@ LOCALVAR si4b ScreenChangedRight;
 
 LOCALPROC ScreenClearChanges(void)
 {
-	ScreenChangedTop = 0;
-	ScreenChangedBottom = vMacScreenHeight;
-	ScreenChangedLeft = 0;
-	ScreenChangedRight = vMacScreenWidth;
+	/* empty rectangle (this fork marked everything as changed) */
+	ScreenChangedTop = vMacScreenHeight;
+	ScreenChangedBottom = 0;
+	ScreenChangedLeft = vMacScreenWidth;
+	ScreenChangedRight = 0;
 }
 
 LOCALPROC ScreenChangedAll(void)
