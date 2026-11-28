@@ -210,7 +210,7 @@ LOCALFUNC blnr M480_Init(void)
 	SetBkMode(m480_memdc, TRANSPARENT);
 
 	m480_font = M480_MakeFont(16, trueblnr);
-	m480_fontS = M480_MakeFont(13, falseblnr);
+	m480_fontS = M480_MakeFont(12, falseblnr);
 
 	/* 1 black pixel of 4 -> visibly gray, uniform areas unchanged */
 	for (i = 0; i <= 4; ++i) {
@@ -529,7 +529,8 @@ LOCALPROC M480_DrawBar(void)
 
 		if (sub[0]) {
 			r3 = r2;
-			r3.bottom = r2.top + (r2.bottom - r2.top) * 3 / 5;
+			r3.top += 1;
+			r3.bottom = r2.top + (r2.bottom - r2.top) / 2 + 2;
 			M480_Text(m480_labels[i], &r3, fg, m480_font,
 				DT_CENTER | DT_BOTTOM | DT_SINGLELINE);
 			r3.top = r3.bottom;
