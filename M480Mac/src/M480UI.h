@@ -42,8 +42,6 @@
 #endif
 
 #ifdef __MINGW32CE__
-HANDLE WINAPI ImmAssociateContext(HWND hwnd, HANDLE himc);
-UINT WINAPI ImmGetVirtualKey(HWND hwnd);
 void WINAPI SystemIdleTimerReset(void);
 #else
 #define SystemIdleTimerReset() ((void)0)
@@ -227,7 +225,7 @@ LOCALFUNC blnr M480_Init(void)
 	}
 
 	/* raw hardware keys, no Hangul composition */
-	(void) ImmAssociateContext(MainWnd, NULL);
+	(void) ImmAssociateContext(MainWnd, (HIMC)0);
 	(void) SetThreadPriority(GetCurrentThread(),
 		THREAD_PRIORITY_ABOVE_NORMAL);
 
