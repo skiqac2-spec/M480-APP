@@ -64,6 +64,8 @@ LOCALVAR ui4b m480_p565[CLUT_size];
 
 /* gray for 0..4 black pixels in a 2x2 block (mono mode) */
 LOCALVAR ui4b m480_gray[5];
+/* black pixel pairs of one byte, 4 lanes (one per byte of the result) */
+LOCALVAR ui5b m480_cnt4[256];
 
 /* touch state */
 LOCALVAR blnr m480_macPress = falseblnr;
@@ -222,6 +224,17 @@ LOCALFUNC blnr M480_Init(void)
 
 	for (i = 0; i < m480_kNumButtons; ++i) {
 		m480_modOn[i] = falseblnr;
+	}
+
+	for (i = 0; i < 256; ++i) {
+		ui5b c = 0;
+		int k;
+
+		for (k = 0; k < 4; ++k) {
+			int pr = (i >> (6 - 2 * k)) & 3;
+			c |= (ui5b)((pr & 1) + (pr >> 1)) << (8 * k);
+		}
+		m480_cnt4[i] = c;
 	}
 
 	/* raw hardware keys, no Hangul composition */
@@ -409,19 +422,26 @@ LOCALPROC M480_DrawMac(si4b top, si4b left, si4b bottom, si4b right)
 	} else
 #endif
 	{
-		/* 1 bit per pixel, 1 = black */
+		/* 1 bit per pixel, 1 = black; one source byte = 4 screen pixels */
+		l &= ~ 3;
+		r = (r + 3) & ~ 3;
+		if (r > M480_MacW) {
+			r = M480_MacW;
+		}
 		for (y = t; y < b; ++y) {
-			ui3b *s0 = cdb + (ui5r)vMacScreenMonoByteWidth * (2 * y);
+			ui3b *s0 = cdb + (ui5r)vMacScreenMonoByteWidth * (2 * y)
+				+ (l >> 2);
 			ui3b *s1 = s0 + vMacScreenMonoByteWidth;
 			ui4b *d = m480_fb + y * M480_W + l;
 
-			for (x = l; x < r; ++x) {
-				int sh = 6 - ((2 * x) & 7);
-				int v0 = (s0[(2 * x) >> 3] >> sh) & 3;
-				int v1 = (s1[(2 * x) >> 3] >> sh) & 3;
-				int n = (v0 & 1) + (v0 >> 1) + (v1 & 1) + (v1 >> 1);
+			for (x = (r - l) >> 2; --x >= 0; ) {
+				ui5r c = m480_cnt4[*s0++] + m480_cnt4[*s1++];
 
-				*d++ = m480_gray[n];
+				d[0] = m480_gray[c & 0xFF];
+				d[1] = m480_gray[(c >> 8) & 0xFF];
+				d[2] = m480_gray[(c >> 16) & 0xFF];
+				d[3] = m480_gray[c >> 24];
+				d += 4;
 			}
 		}
 	}

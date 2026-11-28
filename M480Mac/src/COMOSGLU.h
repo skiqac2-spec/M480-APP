@@ -659,6 +659,19 @@ GLOBALOSGLUPROC Screen_OutputFrame(ui3p screencurrentbuff)
 	si4b bottom;
 	si4b right;
 
+#if M480UI
+	/*
+		SCH-M480: look for screen changes 30 times a second,
+		comparing 300KB of video memory every tick costs too much
+	*/
+	{
+		static ui3b m480_frame = 0;
+
+		if (0 != (++m480_frame & 1)) {
+			return;
+		}
+	}
+#endif
 	if (! EmVideoDisable) {
 		if (ScreenFindChanges(screencurrentbuff, EmLagTime,
 			&top, &left, &bottom, &right))
