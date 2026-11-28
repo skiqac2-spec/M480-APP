@@ -20,6 +20,10 @@
 #define UseTimerThread 0
 #define WantOSGLUWIN 1
 #define M480UI 1
+#ifdef _tWinMain
+#undef _tWinMain
+#endif
+#define _tWinMain WinMain
 
 #define kStrAppName "Mini vMac"
 #define kAppVariationStr "M480Mac"
