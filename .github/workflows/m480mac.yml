@@ -43,7 +43,7 @@ jobs:
           export PATH=/opt/cegcc/bin:$PATH
           make -j4
           /opt/cegcc/bin/arm-mingw32ce-objdump -p build/M480Mac.exe | grep "DLL Name" || true
-          mkdir -p out && cp build/M480Mac.exe README.txt _setup.xml out/
+          mkdir -p out sym && cp build/M480Mac.exe README.txt _setup.xml out/ && cp build/M480Mac-sym.exe sym/
           cd out && gcab -c -z M480Mac.cab _setup.xml M480Mac.exe README.txt && rm _setup.xml
 
       - name: Upload
@@ -51,3 +51,9 @@ jobs:
         with:
           name: M480Mac
           path: M480Mac/out/*
+
+      - name: Upload symbols (for profiling)
+        uses: actions/upload-artifact@v4
+        with:
+          name: M480Mac-sym
+          path: M480Mac/sym/*
