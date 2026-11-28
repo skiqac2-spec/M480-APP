@@ -1,7 +1,7 @@
 # M480-APP 파일 목록 (M480Web '내 파일함'이 읽음)
 # 형식: @그룹ID<TAB>제목<TAB>날짜  /  파일경로(이 폴더 기준)<TAB>크기(자동)<TAB>설명<TAB>휴대폰에 저장될 경로(생략 가능)
 # files.txt 는 tools/update_manifest.py 가 이 파일로부터 만든다.
-@M480Mac	M480 맥 에뮬레이터 1.0 (맥 OS 7.5 컬러, Mac II 256색)	2026-11-28 새로 나옴
+@M480Mac	M480 맥 에뮬레이터 1.1 (맥 OS 7.5 컬러, Mac II 256색)	2026-11-28 화면 다시 그리기 버그 수정·속도 향상
 M480Mac/M480Mac.cab	-	설치 파일 - 누르면 설치 (ROM·디스크는 저장 카드\M480Mac 폴더에)
 M480Mac/M480Mac.exe	-	설치 없이 쓰는 실행 파일
 M480Mac/README.txt	-	사용 설명서 (MacII.ROM·디스크 넣는 법, 컬러 설정, 버튼)
