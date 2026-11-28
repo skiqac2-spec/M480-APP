@@ -217,7 +217,7 @@ LOCALFUNC blnr M480_Init(void)
 		int avg = 255 * (4 - i) / 4;
 		int mn = (i > 0) ? 0 : 255;
 		int v = (3 * avg + mn) / 4;
-		m480_gray[i] = (ui4b)(((v >> 3) << 11) | ((v >> 2) << 5) | (v >> 3));
+		m480_gray[i] = (ui4b)(((v >> 3) << 11) | (((v >> 3) << 1 | (v >> 7)) << 5) | (v >> 3));
 	}
 
 	for (i = 0; i < m480_kNumButtons; ++i) {

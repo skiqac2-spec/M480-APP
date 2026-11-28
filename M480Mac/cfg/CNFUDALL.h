@@ -31,7 +31,7 @@
 #define IncludePbufs 1
 #define NumPbufs 4
 
-#define EnableMouseMotion 1
+#define EnableMouseMotion 0
 
 #define IncludeHostTextClipExchange 1
 #define EnableAutoSlow 1

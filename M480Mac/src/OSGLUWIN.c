@@ -424,6 +424,11 @@ LOCALFUNC blnr MyMoveMouse(si4b h, si4b v)
 	LONG x = h;
 	LONG y = v;
 
+#if M480UI
+	/* touch screen: there is no host cursor to move */
+	return trueblnr;
+#endif
+
 #if VarFullScreen
 	if (UseFullScreen)
 #endif
